@@ -50,3 +50,13 @@ target_link_libraries(my_application PRIVATE iiSocietySync::iiSocietySync)
 ```
 
 소비자는 `CMAKE_PREFIX_PATH`에 SDK 설치 경로와 Qt 6.8.3 경로를 함께 지정한다. 내보낸 타깃이 C++20 요구사항과 `Qt6::Core` 연결을 전달한다. 설치 라이브러리에는 연결한 외부 라이브러리의 런타임 검색 경로를 보존하도록 `INSTALL_RPATH_USE_LINK_PATH`를 설정한다. Qt는 별도 설치된 런타임을 사용하며 복사하여 배포하지 않는다. Qt 사용과 재배포에는 해당 Qt 설치본의 라이선스 조건을 적용한다.
+
+## License
+
+SPDX-License-Identifier: AGPL-3.0-only
+
+iiSocietySync의 자체 작성 코드와 문서는 GNU Affero General Public License v3.0 전용으로
+배포한다. 전체 조건은 [LICENSE](LICENSE)를 따른다.
+
+Qt를 포함한 외부 라이브러리와 별도 고지가 있는 서드파티 코드는 각자의 라이선스를
+유지한다. 이 프로젝트의 라이선스 선언은 해당 서드파티 라이선스를 대체하지 않는다.

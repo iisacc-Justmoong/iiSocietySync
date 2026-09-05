@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.24)
+project(iiSocietySyncConsumer LANGUAGES CXX)
+enable_testing()
+find_package(iiSocietySync 0.1.0 CONFIG REQUIRED)
+add_executable(iiSocietySync_consumer ../hello_world.cpp)
+target_link_libraries(iiSocietySync_consumer PRIVATE iiSocietySync::iiSocietySync)
+set_target_properties(iiSocietySync_consumer PROPERTIES CXX_EXTENSIONS OFF)
+add_test(NAME iiSocietySync.installed_consumer COMMAND iiSocietySync_consumer)

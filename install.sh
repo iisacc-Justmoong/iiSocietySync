@@ -10,8 +10,8 @@ source_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 build_dir="$source_dir/build"
 install_prefix="${INSTALL_PREFIX:-$HOME/.local/SDK/iiSocietySync}"
 qt_prefix="${QT_PREFIX_PATH:-}"
-if [[ -z "$qt_prefix" && -d "$HOME/Qt/6.8.3/macos" ]]; then
-    qt_prefix="$HOME/Qt/6.8.3/macos"
+if [[ -z "$qt_prefix" && -d "/Volumes/Storage/Qt/6.8.3/macos" ]]; then
+    qt_prefix="/Volumes/Storage/Qt/6.8.3/macos"
 fi
 search_prefixes="${CMAKE_PREFIX_PATH:-}"
 if [[ -n "$qt_prefix" ]]; then

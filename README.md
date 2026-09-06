@@ -14,7 +14,7 @@ const QString message = iiSocietySync::helloWorld(); // 정확히 "Hello world!"
 
 ## 빌드, 테스트, 설치
 
-CMake 3.24 이상, C++20 컴파일러, Qt **6.8.3** Core 개발 패키지가 필요하다. Qt 버전은 CMake에서 정확히 일치해야 한다. macOS에 `$HOME/Qt/6.8.3/macos`가 있으면 설치 스크립트가 자동으로 사용한다.
+CMake 3.24 이상, C++20 컴파일러, Qt **6.8.3** Core 개발 패키지가 필요하다. Qt 버전은 CMake에서 정확히 일치해야 한다. macOS에 `/Volumes/Storage/Qt/6.8.3/macos`가 있으면 설치 스크립트가 자동으로 사용한다.
 
 ```sh
 ./install.sh
@@ -25,7 +25,7 @@ CMake 3.24 이상, C++20 컴파일러, Qt **6.8.3** Core 개발 패키지가 필
 경로는 환경변수로 지정하며, 스크립트는 별도의 명령행 인자를 받지 않는다. `CMAKE_PREFIX_PATH`에 여러 경로를 전달할 때에는 세미콜론으로 구분한다.
 
 ```sh
-QT_PREFIX_PATH="$HOME/Qt/6.8.3/macos" \
+QT_PREFIX_PATH="/Volumes/Storage/Qt/6.8.3/macos" \
 INSTALL_PREFIX="$HOME/.local/SDK/iiSocietySync" \
 CMAKE_PREFIX_PATH="/additional/cmake/prefix" ./install.sh
 ```
@@ -34,7 +34,7 @@ CMAKE_PREFIX_PATH="/additional/cmake/prefix" ./install.sh
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_PREFIX_PATH="$HOME/Qt/6.8.3/macos" -DBUILD_TESTING=ON
+  -DCMAKE_PREFIX_PATH="/Volumes/Storage/Qt/6.8.3/macos" -DBUILD_TESTING=ON
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 cmake --install build

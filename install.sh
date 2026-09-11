@@ -13,7 +13,7 @@ qt_prefix="${QT_PREFIX_PATH:-}"
 if [[ -z "$qt_prefix" && -d "/Volumes/Storage/Qt/6.8.3/macos" ]]; then
     qt_prefix="/Volumes/Storage/Qt/6.8.3/macos"
 fi
-search_prefixes="${CMAKE_PREFIX_PATH:-}"
+search_prefixes="${CMAKE_PREFIX_PATH:-}${CMAKE_PREFIX_PATH:+;}$HOME/.local/SDK"
 if [[ -n "$qt_prefix" ]]; then
     search_prefixes="$qt_prefix${search_prefixes:+;$search_prefixes}"
 fi

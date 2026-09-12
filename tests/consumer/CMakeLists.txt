@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 project(iiSocietySyncConsumer LANGUAGES CXX)
 enable_testing()
-find_package(iiSocietySync 0.3.0 CONFIG REQUIRED)
+find_package(iiSocietySync 0.4.0 CONFIG REQUIRED)
 find_package(Qt6 6.8.3 EXACT REQUIRED COMPONENTS Test)
 set(CMAKE_AUTOMOC ON)
 set(IISOCIETYSYNC_TEST_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}" CACHE STRING "Test data directory as seen by the target runtime")

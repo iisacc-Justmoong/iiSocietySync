@@ -12,6 +12,23 @@ using namespace iiSocietySync;
 class ControllerTests : public QObject {
     Q_OBJECT
 private slots:
+    void processHandoffDrainsAnActiveFileScan() {
+        QTemporaryDir root(SYNC_TEST_DIRECTORY "/handoff-XXXXXX");
+        const auto drive = iiSocietyContainer::SocietyDrive::create(root.path()); QVERIFY(drive);
+        QFile file(root.filePath("Models/large")); QVERIFY(file.open(QIODevice::WriteOnly));
+        QVERIFY(file.resize(1024LL * 1024 * 1024)); file.close();
+        Controller sync({}); const QString scope(64, 'a'); sync.open(root.path(), scope); QTRY_VERIFY(sync.available());
+        sync.setPeers({"trusted"}, {});
+        const QJsonObject request{{"op", "society.sync"}, {"protocol", 2}, {"scope", scope},
+            {"token", QUuid::createUuid().toString(QUuid::WithoutBraces)},
+            {"message", QJsonObject{{"action", "changes"}, {"container", drive->identifier()}}}};
+        QVERIFY(sync.handle("trusted", request).value("pending").toBool());
+        QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(root.filePath(".society-sync/operation.lock")), 5000);
+        sync.closeAndWait(); QVERIFY(!sync.available());
+        QVERIFY(!QFileInfo::exists(root.filePath(".society-sync/operation.lock")));
+        Replica successor; QVERIFY2(successor.open(root.path(), scope), qPrintable(successor.errorString()));
+        QVERIFY(!sync.handle("trusted", request).value("ok").toBool());
+    }
     void filesProjectionSupportsCreateReadAndPaginationWithoutExposingOtherSections() {
         QTemporaryDir root(SYNC_TEST_DIRECTORY "/files-service-XXXXXX"); QVERIFY(root.isValid());
         QVERIFY(iiSocietyContainer::SocietyDrive::create(root.path()));
@@ -88,8 +105,15 @@ private slots:
         QCOMPARE(iiSocietyContainer::SocietyDrive::open(mobile.path())->identifier(), iiSocietyContainer::SocietyDrive::open(root.path())->identifier());
         QVERIFY(!QFileInfo::exists(root.filePath("Files/mobile.txt")));
         QVERIFY(local.open(QIODevice::WriteOnly)); local.write("mobile edit"); local.close();
-        completed.clear(); syncing.synchronizeNow(); QTRY_VERIFY_WITH_TIMEOUT(completed.size() > 0, 30000);
+        completed.clear();
+        // A local filesystem edit must propagate without a UI/manual sync call.
+        QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(root.filePath("Files/mobile.txt")), 1800);
         QFile uploaded(root.filePath("Files/mobile.txt")); QVERIFY(uploaded.open(QIODevice::ReadOnly)); QCOMPARE(uploaded.readAll(), QByteArray("mobile edit"));
+        uploaded.close();
+        QVERIFY(local.open(QIODevice::WriteOnly | QIODevice::Truncate)); local.write("same file changed"); local.close();
+        QTRY_VERIFY_WITH_TIMEOUT(([&] { QFile f(root.filePath("Files/mobile.txt")); return f.open(QIODevice::ReadOnly) && f.readAll() == "same file changed"; })(), 1800);
+        QFile hostEdit(root.filePath("Files/host-edit")); QVERIFY(hostEdit.open(QIODevice::WriteOnly)); hostEdit.write("host event"); hostEdit.close();
+        QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(mobile.filePath("Files/host-edit")), 1800);
         QVERIFY(!client.hosting());
         QVERIFY(!files("phone", {{"op", "list"}, {"path", "../Models"}}).value("ok").toBool());
         syncing.close(); hosting.close(); client.stop(); host.stop();

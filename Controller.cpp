@@ -2,6 +2,8 @@
 #include "Synchronizer.h"
 #include <SharedStorage.h>
 #include <QDateTime>
+#include <QDir>
+#include <QFileSystemWatcher>
 #include <QJsonDocument>
 #include <QPointer>
 #include <QSet>
@@ -19,15 +21,26 @@ public:
     std::unique_ptr<Replica> store;
     Synchronizer *sync = nullptr;
     QTimer *timer = nullptr;
+    QTimer *changedFiles = nullptr;
+    QFileSystemWatcher *watcher = nullptr;
+    QString container;
+    bool pending = false;
     QStringList hosts, queue;
     void initialize() {
         store = std::make_unique<Replica>(); sync = new Synchronizer(store.get(), this); timer = new QTimer(this);
-        timer->setInterval(5000);
+        timer->setInterval(1000);
+        watcher = new QFileSystemWatcher(this); changedFiles = new QTimer(this);
+        changedFiles->setSingleShot(true); changedFiles->setInterval(75);
+        const auto changed = [this] { pending = true; if (!changedFiles->isActive()) changedFiles->start(); };
+        connect(watcher, &QFileSystemWatcher::directoryChanged, this, changed);
+        connect(watcher, &QFileSystemWatcher::fileChanged, this, changed);
+        connect(changedFiles, &QTimer::timeout, this, &SyncWorker::tick);
         connect(timer, &QTimer::timeout, this, &SyncWorker::tick);
         connect(sync, &Synchronizer::requestReady, this, [this](auto id, auto peer, auto payload) { emit request(generation, id, peer, payload); });
         connect(sync, &Synchronizer::progress, this, [this](auto path, auto done, auto total) { emit progress(generation, path, done, total); });
         connect(sync, &Synchronizer::mirrorChanged, this, [this](auto binding) { emit mirrorChanged(generation, binding); });
         connect(sync, &Synchronizer::finished, this, [this](const QString &peer, bool ok, const QString &error) {
+            refreshWatches();
             emit status(generation, store->isOpen(), false, ok ? QString() : error);
             if (ok) emit synchronized(generation, peer);
             QTimer::singleShot(0, this, &SyncWorker::next);
@@ -37,11 +50,14 @@ public:
     void configure(QString path, QString scope, quint64 revision) {
         if (!store) initialize();
         sync->stop(); generation = revision; queue.clear(); hosts.clear(); store->close();
+        pending = false; changedFiles->stop(); container.clear();
+        const auto paths = watcher->directories() + watcher->files(); if (!paths.isEmpty()) watcher->removePaths(paths);
         const auto shared = cancellation;
         store->setCancellation([shared, revision] { return shared->load() != revision; });
         if (scope.isEmpty()) { emit status(generation, false, false, {}); return; }
         QString error; const auto storage = iiSocietyContainer::SharedStorage::open(path, &error, true);
         const bool ok = storage && store->open(storage->drive().rootPath(), scope);
+        if (ok) { container = storage->drive().rootPath(); refreshWatches(); }
         if (ok) emit mirrorChanged(generation, store->binding());
         emit status(generation, ok, false, ok ? QString() : storage ? store->errorString() : error);
     }
@@ -52,12 +68,40 @@ public:
         sync->stop(); hosts = values; queue.clear(); tick();
     }
     void tick() {
-        if (!store || !store->isOpen() || sync->busy() || cancellation->load() != generation) return;
+        if (!store || !store->isOpen() || cancellation->load() != generation) return;
+        if (sync->busy()) { pending = true; return; }
+        pending = false;
         queue = hosts; next();
     }
     void next() {
-        if (!store || !store->isOpen() || sync->busy() || queue.isEmpty() || cancellation->load() != generation) return;
+        if (!store || !store->isOpen() || sync->busy() || cancellation->load() != generation) return;
+        if (queue.isEmpty()) { if (pending && !changedFiles->isActive()) changedFiles->start(); return; }
         const auto peer = queue.takeFirst(); emit status(generation, true, true, {}); sync->start(peer);
+    }
+    void refreshWatches() {
+        if (container.isEmpty()) return;
+        QSet<QString> wanted;
+        QStringList directories;
+        for (const auto section : iiSocietyContainer::allStoreSections())
+            directories.append(QDir(container).filePath(iiSocietyContainer::storeSectionName(section)));
+        // Limit OS handles; the one-second reconciliation also covers overflow,
+        // missed/coalesced events and files replaced by an atomic rename.
+        while (!directories.isEmpty() && wanted.size() < 8192 && cancellation->load() == generation) {
+            const auto path = directories.takeLast(); const QFileInfo directory(path);
+            if (!directory.isDir() || directory.isSymLink()) continue;
+            wanted.insert(path);
+            const auto children = QDir(path).entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::NoSymLinks | QDir::Hidden);
+            for (const auto &entry : children) {
+                if (entry.fileName().startsWith(".society-") || entry.fileName().startsWith(".iiserverhost-")) continue;
+                if (entry.isDir()) directories.append(entry.absoluteFilePath());
+                else if (entry.isFile()) wanted.insert(entry.absoluteFilePath());
+                if (wanted.size() >= 8192) break;
+            }
+        }
+        const auto paths = watcher->directories() + watcher->files(); const QSet<QString> existing(paths.begin(), paths.end());
+        const auto removed = existing - wanted, added = wanted - existing;
+        if (!removed.isEmpty()) watcher->removePaths(removed.values());
+        if (!added.isEmpty()) watcher->addPaths(added.values());
     }
 signals:
     void mirrorChanged(quint64 generation, QJsonObject binding);
@@ -121,6 +165,12 @@ void Controller::open(const QString &container, const QString &accountScope) {
 void Controller::close() {
     if (d->scope.isEmpty() && d->path.isEmpty()) return;
     open({}, {});
+}
+void Controller::closeAndWait() {
+    close();
+    // configure() and any cancelled filesystem operation precede this barrier
+    // on the same worker queue. No old replica handle survives the return.
+    QMetaObject::invokeMethod(d->worker, [] {}, Qt::BlockingQueuedConnection);
 }
 void Controller::setPeers(const QStringList &authorizedPeers, const QStringList &remoteHosts) {
     d->authorized = QSet<QString>(authorizedPeers.begin(), authorizedPeers.end());

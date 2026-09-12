@@ -1,6 +1,8 @@
 #include "Synchronizer.h"
 #include <SocietyDrive.h>
 #include <QDir>
+#include <QCryptographicHash>
+#include <QJsonDocument>
 #include <QFile>
 #include <QJsonArray>
 #include <QSignalSpy>
@@ -25,6 +27,97 @@ class SyncTests : public QObject {
         QVERIFY2(completed[0][1].toBool(), qPrintable(completed[0][2].toString()));
     }
 private slots:
+    void smallChangesAndDeletionDoNotWaitForBulkTransfer_data() {
+        QTest::addColumn<bool>("upload");
+        QTest::newRow("download") << false;
+        QTest::newRow("upload") << true;
+    }
+    void smallChangesAndDeletionDoNotWaitForBulkTransfer() {
+        QFETCH(bool, upload);
+        QTemporaryDir a(SYNC_TEST_DIRECTORY "/fair-a-XXXXXX"), b(SYNC_TEST_DIRECTORY "/fair-b-XXXXXX");
+        QVERIFY(iiSocietyContainer::SocietyDrive::create(a.path())); QVERIFY(iiSocietyContainer::SocietyDrive::create(b.path()));
+        put(b.filePath("Files/z-note"), "old"); put(b.filePath("Files/z-delete"), "remove");
+        Replica client, host; QVERIFY(client.open(a.path(), QString(64, 'a'))); QVERIFY(host.open(b.path(), QString(64, 'a')));
+        cycle(client, host);
+        const QByteArray large(Replica::ChunkBytes * 5, 'L');
+        put((upload ? a : b).filePath("Files/a-large"), large);
+        Synchronizer sync(&client); QSignalSpy done(&sync, &Synchronizer::finished);
+        bool changed = false, prioritized = false; QList<qint64> offsets;
+        connect(&sync, &Synchronizer::progress, &sync, [&](const QString &path, qint64 offset, qint64) {
+            if (!path.endsWith("a-large") || offset <= Replica::ChunkBytes) return;
+            const bool smallReady = get(a.filePath("Files/z-note")) == "new" && !QFileInfo::exists(a.filePath("Files/z-delete"));
+            const bool uploadReady = !upload || get(b.filePath("Files/z-upload")) == "phone edit";
+            prioritized |= smallReady && uploadReady && !QFileInfo::exists((upload ? b : a).filePath("Files/a-large"));
+        });
+        connect(&sync, &Synchronizer::requestReady, &sync, [&](auto id, auto, auto wire) {
+            const auto message = wire.value("message").toObject();
+            const bool largeBytes = message.value("action") == (upload ? "chunk" : "read")
+                && message.value("entry").toObject().value("path").toString().endsWith("a-large");
+            if (largeBytes) offsets.append(message.value("offset").toString().toLongLong());
+            const auto response = host.handle("client", message);
+            if (largeBytes && !changed) {
+                changed = true; put(b.filePath("Files/z-note"), "new"); QVERIFY(QFile::remove(b.filePath("Files/z-delete")));
+                if (upload) put(a.filePath("Files/z-upload"), "phone edit");
+                // A slow payload must not hold later edits until the bulk file completes.
+                QTimer::singleShot(1100, &sync, [&, id, response] { sync.receive(id, {{"ok", true}, {"result", response}}); });
+            } else sync.receive(id, {{"ok", true}, {"result", response}});
+        });
+        QVERIFY(sync.start("host")); QTRY_COMPARE_WITH_TIMEOUT(done.size(), 1, 15000);
+        QVERIFY2(done[0][1].toBool(), qPrintable(done[0][2].toString()));
+        QVERIFY2(prioritized, "A small edit/deletion waited behind the entire bulk payload.");
+        QCOMPARE(get((upload ? b : a).filePath("Files/a-large")), large);
+        QCOMPARE(offsets.size(), 5);
+        for (int i = 0; i < offsets.size(); ++i) QCOMPARE(offsets[i], qint64(i) * Replica::ChunkBytes);
+    }
+    void exchangesEveryManifestPageBeforeAnyFileBytes() {
+        QTemporaryDir a(SYNC_TEST_DIRECTORY "/metadata-a-XXXXXX"), b(SYNC_TEST_DIRECTORY "/metadata-b-XXXXXX");
+        QVERIFY(iiSocietyContainer::SocietyDrive::create(a.path())); QVERIFY(iiSocietyContainer::SocietyDrive::create(b.path()));
+        Replica client, host; QVERIFY(client.open(a.path(), QString(64, 'a'))); QVERIFY(host.open(b.path(), QString(64, 'a')));
+        cycle(client, host);
+        for (int i = 0; i < 140; ++i) put(a.filePath("Files/local-" + QString::number(i)), "upload");
+        put(b.filePath("Models/remote"), "download");
+        Synchronizer sync(&client); QSignalSpy done(&sync, &Synchronizer::finished);
+        bool manifestComplete = false, sawBytes = false; int pages = 0, announced = 0;
+        connect(&sync, &Synchronizer::requestReady, &sync, [&](auto id, auto, auto wire) {
+            const auto message = wire.value("message").toObject(); const auto action = message.value("action").toString();
+            if (action == "manifest") {
+                ++pages; announced += message.value("entries").toArray().size();
+                QVERIFY(!message.contains("data"));
+                for (const auto &entry : message.value("entries").toArray()) {
+                    QVERIFY(Replica::validRecord(entry.toObject()));
+                    QCOMPARE(entry.toObject().value("hash").toString().size(), 64);
+                }
+            }
+            if (action == "read" || action == "chunk") {
+                QVERIFY2(manifestComplete, "File bytes were sent before all outgoing identity pages were acknowledged.");
+                QVERIFY(announced >= 140); sawBytes = true;
+            }
+            const auto response = host.handle("client", message);
+            if (action == "manifest" && response.value("complete").toBool()) manifestComplete = true;
+            sync.receive(id, {{"ok", true}, {"result", response}});
+        });
+        QVERIFY(sync.start("host")); QTRY_COMPARE_WITH_TIMEOUT(done.size(), 1, 20000);
+        QVERIFY2(done[0][1].toBool(), qPrintable(done[0][2].toString()));
+        QVERIFY(pages >= 2); QVERIFY(sawBytes);
+        QCOMPARE(get(a.filePath("Models/remote")), QByteArray("download"));
+        QCOMPARE(get(b.filePath("Files/local-139")), QByteArray("upload"));
+    }
+    void rejectedManifestAcknowledgementPreventsByteTransfer() {
+        QTemporaryDir a(SYNC_TEST_DIRECTORY "/rejected-a-XXXXXX"), b(SYNC_TEST_DIRECTORY "/rejected-b-XXXXXX");
+        QVERIFY(iiSocietyContainer::SocietyDrive::create(a.path())); QVERIFY(iiSocietyContainer::SocietyDrive::create(b.path()));
+        Replica client, host; QVERIFY(client.open(a.path(), QString(64, 'a'))); QVERIFY(host.open(b.path(), QString(64, 'a')));
+        cycle(client, host); put(a.filePath("Files/local"), "upload"); put(b.filePath("Models/remote"), "download");
+        Synchronizer sync(&client); QSignalSpy done(&sync, &Synchronizer::finished); int bytes = 0;
+        connect(&sync, &Synchronizer::requestReady, &sync, [&](auto id, auto, auto wire) {
+            const auto message = wire.value("message").toObject();
+            if (message.value("action") == "read" || message.value("action") == "chunk") ++bytes;
+            auto response = host.handle("client", message);
+            if (message.value("action") == "manifest") response.insert("manifest", QString(64, 'f'));
+            sync.receive(id, {{"ok", true}, {"result", response}});
+        });
+        QVERIFY(sync.start("host")); QTRY_COMPARE(done.size(), 1);
+        QVERIFY(!done[0][1].toBool()); QCOMPARE(bytes, 0);
+    }
     void firstJoinAdoptsOneLogicalDriveAndPreservesFormerContentsPrivately() {
         QTemporaryDir a(SYNC_TEST_DIRECTORY "/mirror-a-XXXXXX"), b(SYNC_TEST_DIRECTORY "/mirror-b-XXXXXX"), c(SYNC_TEST_DIRECTORY "/mirror-c-XXXXXX");
         const auto old = iiSocietyContainer::SocietyDrive::create(a.path()); QVERIFY(old);

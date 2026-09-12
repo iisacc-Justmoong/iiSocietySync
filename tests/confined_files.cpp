@@ -12,6 +12,20 @@ using iiSocietySync::detail::FileState;
 class ConfinedFilesTests : public QObject {
     Q_OBJECT
 private slots:
+    void sha256MatchesAcrossPaddingAndReadBoundaries() {
+        QTemporaryDir dir(SYNC_TEST_DIRECTORY "/files-digest-XXXXXX");
+        ConfinedFiles files; QVERIFY(files.open(dir.path()));
+        for (const int size : {0, 1, 55, 56, 63, 64, 65, 1024 * 1024, 1024 * 1024 + 333}) {
+            QByteArray bytes(size, Qt::Uninitialized);
+            for (int i = 0; i < size; ++i) bytes[i] = char(i % 251);
+            const auto name = QString::number(size);
+            QFile output(dir.filePath(name)); QVERIFY(output.open(QIODevice::WriteOnly));
+            QCOMPARE(output.write(bytes), bytes.size()); output.close();
+            FileState state; QVERIFY(files.state(name, &state));
+            QCOMPARE(files.hash(name, state.stamp), QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex()));
+        }
+        QCOMPARE(files.hash("0"), QStringLiteral("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+    }
     void chunksResumeAndReplacementKeepsOriginal() {
         QTemporaryDir dir(SYNC_TEST_DIRECTORY "/files-chunks-XXXXXX"); QVERIFY(dir.isValid());
         ConfinedFiles files; QVERIFY2(files.open(dir.path()), qPrintable(files.error));

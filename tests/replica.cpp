@@ -19,6 +19,28 @@ static QByteArray readFile(const QString &path) { QFile f(path); if (!f.open(QIO
 class ReplicaTests : public QObject {
     Q_OBJECT
 private slots:
+    void manifestHashAndOrderingAreCheckedWithoutWritingFileBytes() {
+        QTemporaryDir a(SYNC_TEST_DIRECTORY "/manifest-source-XXXXXX"), b(SYNC_TEST_DIRECTORY "/manifest-host-XXXXXX");
+        QVERIFY(iiSocietyContainer::SocietyDrive::create(a.path())); QVERIFY(iiSocietyContainer::SocietyDrive::create(b.path()));
+        writeFile(a.filePath("Files/one"), "first"); writeFile(a.filePath("Files/two"), "second");
+        Replica sender, host; QVERIFY(sender.open(a.path(), scope)); QVERIFY(host.open(b.path(), scope)); QVERIFY(sender.scan());
+        const auto changes = sender.changes(); const auto entries = changes.value("entries").toArray(); QCOMPARE(entries.size(), 2);
+        QByteArray records; for (const auto &entry : entries) records += QJsonDocument(entry.toObject()).toJson(QJsonDocument::Compact) + '\n';
+        const auto id = QString::fromLatin1(QCryptographicHash::hash(records, QCryptographicHash::Sha256).toHex());
+        QJsonObject page{{"action", "manifest"}, {"container", host.containerId()}, {"replica", sender.replicaId()}, {"manifest", id},
+            {"offset", "0"}, {"total", "2"}, {"after", "0"}, {"through", changes.value("through")}, {"entries", QJsonArray{entries[0]}}};
+        auto response = host.handle("sender", page); QVERIFY(response.value("ok").toBool()); QVERIFY(!response.value("complete").toBool());
+        QCOMPARE(host.handle("sender", {{"action", "begin"}, {"manifest", id}, {"entry", entries[0]}}).value("error"), "manifest_required_before_transfer");
+        auto outOfOrder = page; outOfOrder.insert("offset", "2"); outOfOrder.insert("entries", QJsonArray{});
+        QVERIFY(!host.handle("sender", outOfOrder).value("ok").toBool());
+        page.insert("offset", "1"); page.insert("entries", QJsonArray{entries[1]});
+        response = host.handle("sender", page); QVERIFY(response.value("ok").toBool()); QVERIFY(response.value("complete").toBool());
+        QVERIFY(QDir(b.filePath("Files")).isEmpty()); QVERIFY(host.record("files/one").isEmpty());
+        QCOMPARE(host.changes().value("through").toString(), "0");
+        page.insert("offset", "0"); page.insert("entries", entries); page.insert("manifest", QString(64, 'f'));
+        QCOMPARE(host.handle("sender", page).value("error"), "manifest_hash_mismatch");
+        QVERIFY(QDir(b.filePath("Files")).isEmpty());
+    }
     void sectionInventoryAndLocalBoundary() {
         QTemporaryDir dir(SYNC_TEST_DIRECTORY "/replica-XXXXXX");
         QVERIFY(iiSocietyContainer::SocietyDrive::create(dir.path()));

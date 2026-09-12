@@ -17,6 +17,8 @@ public:
     ~Controller() override;
     void open(const QString &container, const QString &accountScope);
     void close();
+    // Desktop process handoff: cancel and drain the worker before releasing a lease.
+    void closeAndWait();
     void setPeers(const QStringList &authorizedPeers, const QStringList &remoteHosts);
     bool available() const;
     bool busy() const;

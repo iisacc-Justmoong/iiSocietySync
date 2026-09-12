@@ -68,6 +68,13 @@ QString conflictPath(const QJsonObject &loser) {
 
 class Replica::Private {
 public:
+    struct Manifest {
+        QString id, replica;
+        qint64 next = 0, total = 0, after = 0, through = 0, sequence = 0;
+        bool complete = false;
+        QCryptographicHash digest{QCryptographicHash::Sha256};
+    };
+    QHash<QString, std::shared_ptr<Manifest>> manifests;
     detail::ConfinedFiles files;
     std::optional<iiSocietyContainer::SocietyDrive> drive;
     QSqlDatabase db; QString connection, scope, id; mutable QString error;
@@ -253,7 +260,7 @@ public:
 
 Replica::Replica() : d(std::make_unique<Private>()) {}
 Replica::~Replica() { close(); }
-void Replica::close() { d->drive.reset(); d->db.close(); d->db = {}; if (!d->connection.isEmpty()) QSqlDatabase::removeDatabase(d->connection); d->connection.clear(); d->scope.clear(); d->id.clear(); }
+void Replica::close() { d->manifests.clear(); d->drive.reset(); d->db.close(); d->db = {}; if (!d->connection.isEmpty()) QSqlDatabase::removeDatabase(d->connection); d->connection.clear(); d->scope.clear(); d->id.clear(); }
 QString Replica::errorString() const { return d->error; }
 bool Replica::isOpen() const { return d->db.isOpen() && !d->scope.isEmpty() && !d->id.isEmpty(); }
 QString Replica::containerId() const { return d->drive ? d->drive->identifier() : QString(); }
@@ -459,7 +466,7 @@ QJsonObject Replica::handle(const QString &peer, const QJsonObject &request) {
     if (action == "describe") {
         if (!d->ready()) return d->failed();
         if (!d->meta("host").isEmpty()) return d->failed("mirror_cannot_be_primary_host");
-        return {{"ok", true}, {"protocol", 2}, {"container", containerId()}, {"replica", replicaId()}};
+        return {{"ok", true}, {"protocol", 2}, {"manifestVersion", 1}, {"container", containerId()}, {"replica", replicaId()}};
     }
     if (action == "changes") {
         qint64 after = 0, through = 0;
@@ -467,7 +474,50 @@ QJsonObject Replica::handle(const QString &peer, const QJsonObject &request) {
         if (!through && !scan()) return d->failed();
         return changes(after, through);
     }
+    if (action == "manifest") {
+        if (!d->ready()) return d->failed();
+        qint64 offset, total, after, through;
+        const auto id = request.value("manifest").toString(), replica = request.value("replica").toString();
+        const auto entries = request.value("entries").toArray();
+        if (!hex(id) || QUuid(replica).isNull() || replica == replicaId()
+            || !number(request.value("offset"), &offset) || !number(request.value("total"), &total)
+            || !number(request.value("after"), &after) || !number(request.value("through"), &through) || after > through
+            || total > 250000 || offset > total || entries.size() > 128 || entries.size() > total - offset
+            || !request.value("entries").isArray() || (entries.isEmpty() && total != 0)) return d->failed("invalid_manifest_page");
+        if (offset == 0) {
+            if (!d->manifests.contains(peer) && d->manifests.size() >= 32) return d->failed("manifest_capacity");
+            auto state = std::make_shared<Private::Manifest>();
+            state->id = id; state->replica = replica; state->total = total;
+            state->after = state->sequence = after; state->through = through; d->manifests.insert(peer, state);
+        }
+        const auto state = d->manifests.value(peer);
+        if (!state || state->complete || state->id != id || state->replica != replica || state->next != offset
+            || state->total != total || state->after != after || state->through != through) return d->failed("manifest_page_out_of_order");
+        for (const auto &value : entries) {
+            const auto entry = value.toObject(); qint64 sequence;
+            const QSet<QString> allowed{"path", "kind", "size", "hash", "clock", "version", "sequence"};
+            const auto keys = entry.keys();
+            if (!validRecord(entry) || !number(entry.value("sequence"), &sequence) || sequence <= state->sequence || sequence > through
+                || !QSet<QString>(keys.begin(), keys.end()).subtract(allowed).isEmpty()) {
+                d->manifests.remove(peer); return d->failed("invalid_manifest_entry");
+            }
+            state->digest.addData(json(entry)); state->digest.addData(QByteArrayView("\n")); state->sequence = sequence;
+        }
+        state->next += entries.size();
+        if (state->next == total) {
+            if (QString::fromLatin1(state->digest.result().toHex()) != id) {
+                d->manifests.remove(peer); return d->failed("manifest_hash_mismatch");
+            }
+            state->complete = true;
+        }
+        // Metadata never creates destination files, transfers, or journal entries.
+        return {{"ok", true}, {"manifest", id}, {"next", QString::number(state->next)}, {"complete", state->complete}};
+    }
     auto lock = d->lock(); if (!lock) return d->failed();
+    if (request.contains("manifest")) {
+        const auto state = d->manifests.value(peer);
+        if (!state || !state->complete || state->id != request.value("manifest").toString()) return d->failed("manifest_required_before_transfer");
+    }
     const auto e = request.value("entry").toObject(); if (!validRecord(e)) return d->failed("invalid_entry");
     const auto path = e.value("path").toString();
     if (action == "read") {

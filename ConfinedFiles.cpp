@@ -1,5 +1,8 @@
 #include "ConfinedFiles.h"
 #include <QCryptographicHash>
+#ifdef Q_OS_DARWIN
+#include <CommonCrypto/CommonDigest.h>
+#endif
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -150,15 +153,34 @@ QString ConfinedFiles::hash(const QString &path, const QString &expected) {
     if (fd.fd < 0 || ::fstat(fd.fd, &s) || !S_ISREG(s.st_mode)) { fail("not_file"); return {}; }
     const auto before = stamp(s);
     if (!expected.isEmpty() && expected != before) { fail("file_changed"); return {}; }
-    QCryptographicHash hash(QCryptographicHash::Sha256); QByteArray buffer(1024 * 1024, Qt::Uninitialized);
+#ifdef Q_OS_DARWIN
+    // CommonCrypto uses the platform's SHA implementation. The Qt distribution
+    // used by our Apple builds otherwise hashes large models in software.
+    CC_SHA256_CTX hash;
+    if (!CC_SHA256_Init(&hash)) { fail("hash_initialization_failed"); return {}; }
+#else
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+#endif
+    QByteArray buffer(1024 * 1024, Qt::Uninitialized);
     while (true) {
         if (cancelled && cancelled()) { fail("cancelled"); return {}; }
         const auto size = ::read(fd.fd, buffer.data(), buffer.size());
         if (size < 0) { fail("read_failed"); return {}; }
-        if (!size) break; hash.addData(QByteArrayView(buffer.constData(), size));
+        if (!size) break;
+#ifdef Q_OS_DARWIN
+        if (!CC_SHA256_Update(&hash, buffer.constData(), CC_LONG(size))) { fail("hash_update_failed"); return {}; }
+#else
+        hash.addData(QByteArrayView(buffer.constData(), size));
+#endif
     }
     if (::fstat(fd.fd, &s) || stamp(s) != before) { fail("file_changed"); return {}; }
+#ifdef Q_OS_DARWIN
+    QByteArray result(CC_SHA256_DIGEST_LENGTH, Qt::Uninitialized);
+    if (!CC_SHA256_Final(reinterpret_cast<unsigned char *>(result.data()), &hash)) { fail("hash_finalization_failed"); return {}; }
+    return QString::fromLatin1(result.toHex());
+#else
     return QString::fromLatin1(hash.result().toHex());
+#endif
 #else
     Q_UNUSED(path); Q_UNUSED(expected); fail("unsupported_filesystem"); return {};
 #endif

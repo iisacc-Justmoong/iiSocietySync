@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(iiSocietySync VERSION 0.4.0 LANGUAGES CXX)
+project(iiSocietySync VERSION 0.5.0 LANGUAGES CXX)
 
 if(PROJECT_IS_TOP_LEVEL AND CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     if(DEFINED ENV{HOME})
@@ -13,7 +13,7 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 include(CTest)
 find_package(Qt6 6.8.3 EXACT REQUIRED COMPONENTS Core Sql Network)
-find_package(iiSocietyContainer 0.10.0 CONFIG REQUIRED HINTS "$ENV{HOME}/.local/SDK/iiSocietyContainer")
+find_package(iiSocietyContainer 0.13.0 CONFIG REQUIRED HINTS "$ENV{HOME}/.local/SDK/iiSocietyContainer")
 find_package(iiServerHost 0.4.1 CONFIG REQUIRED HINTS "$ENV{HOME}/.local/SDK/iiServerHost")
 set(CMAKE_AUTOMOC ON)
 
@@ -38,7 +38,7 @@ target_include_directories(iiSocietySync PUBLIC
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
 set_target_properties(iiSocietySync PROPERTIES
     VERSION ${PROJECT_VERSION}
-    SOVERSION ${PROJECT_VERSION_MAJOR}
+    SOVERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
     CXX_EXTENSIONS OFF
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN YES

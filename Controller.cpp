@@ -17,6 +17,7 @@ class SyncWorker final : public QObject {
     Q_OBJECT
 public:
     std::shared_ptr<std::atomic<quint64>> cancellation;
+    std::shared_ptr<std::atomic<quint64>> inspection;
     quint64 generation = 0;
     std::unique_ptr<Replica> store;
     Synchronizer *sync = nullptr;
@@ -48,6 +49,7 @@ public:
         timer->start();
     }
     void configure(QString path, QString scope, quint64 revision) {
+        if (cancellation->load() != revision) return;
         if (!store) initialize();
         sync->stop(); generation = revision; queue.clear(); hosts.clear(); store->close();
         pending = false; changedFiles->stop(); container.clear();
@@ -60,6 +62,15 @@ public:
         if (ok) { container = storage->drive().rootPath(); refreshWatches(); }
         if (ok) emit mirrorChanged(generation, store->binding());
         emit status(generation, ok, false, ok ? QString() : storage ? store->errorString() : error);
+    }
+    void inspect(QString path, QString scope, quint64 revision) {
+        if (inspection->load() != revision) return;
+        if (path.isEmpty()) { emit inspected(revision, path, scope, {}, {}, {}); return; }
+        const auto binding = Replica::binding(path);
+        const auto drive = iiSocietyContainer::SocietyDrive::open(path);
+        const auto primary = binding.isEmpty() ? Replica::primaryHost(path, scope) : binding.value("host").toString();
+        if (inspection->load() == revision)
+            emit inspected(revision, path, scope, binding, drive ? drive->identifier() : QString(), primary);
     }
     void setHosts(QStringList values, quint64 revision) {
         if (generation != revision || !store) return;
@@ -110,23 +121,31 @@ signals:
     void status(quint64 generation, bool available, bool busy, QString error);
     void synchronized(quint64 generation, QString peer);
     void progress(quint64 generation, QString path, qint64 done, qint64 total);
+    void inspected(quint64 revision, QString path, QString scope, QJsonObject binding, QString identifier, QString primary);
 };
 class Controller::Private {
 public:
     struct Job { QJsonObject request, result; bool finished = false; qint64 created = 0; };
-    Controller *q; RequestSender send; QThread thread; SyncWorker *worker;
+    Controller *q; RequestSender send; QThread *thread = new QThread; SyncWorker *worker;
     std::shared_ptr<std::atomic<quint64>> cancellation = std::make_shared<std::atomic<quint64>>(0);
+    std::shared_ptr<std::atomic<quint64>> inspection = std::make_shared<std::atomic<quint64>>(0);
     QMap<QString, Job> jobs; QHash<QString, QString> transportIds; QSet<QString> authorized;
-    QString path, scope, error; bool ready = false, busy = false;
+    QString path, scope, error; bool ready = false, busy = false, opening = false, shutdown = false;
     Private(Controller *owner, RequestSender sender) : q(owner), send(std::move(sender)), worker(new SyncWorker) {
-        worker->cancellation = cancellation; worker->moveToThread(&thread);
+        worker->cancellation = cancellation; worker->inspection = inspection; worker->moveToThread(thread);
+        thread->setObjectName("iiSocietySync-worker");
         QObject::connect(worker, &SyncWorker::mirrorChanged, q, [this](quint64 generation, const QJsonObject &binding) {
             if (generation == cancellation->load()) emit q->mirrorChanged(binding);
         });
-        QObject::connect(&thread, &QThread::finished, worker, &QObject::deleteLater);
+        QObject::connect(thread, &QThread::finished, worker, &QObject::deleteLater);
+        QObject::connect(worker, &SyncWorker::inspected, q,
+            [this](quint64 revision, const QString &path, const QString &scope, const QJsonObject &binding, const QString &identifier, const QString &primary) {
+                if (!shutdown && inspection->load() == revision)
+                    emit q->containerInspected(path, scope, binding, identifier, primary);
+            });
         QObject::connect(worker, &SyncWorker::status, q, [this](quint64 generation, bool available, bool active, const QString &message) {
             if (generation != cancellation->load()) return;
-            ready = available; busy = active; error = message; emit q->changed();
+            ready = available; busy = active; opening = false; error = message; emit q->changed();
         });
         QObject::connect(worker, &SyncWorker::request, q, [this](quint64 generation, const QString &id, const QString &peer, const QJsonObject &payload) {
             if (generation != cancellation->load() || !authorized.contains(peer) || !send) return;
@@ -141,12 +160,17 @@ public:
         });
         QObject::connect(worker, &SyncWorker::synchronized, q, [this](quint64 generation, const QString &peer) { if (generation == cancellation->load()) emit q->synchronized(peer); });
         QObject::connect(worker, &SyncWorker::progress, q, [this](quint64 generation, const QString &path, qint64 done, qint64 total) { if (generation == cancellation->load()) emit q->progress(path, done, total); });
-        thread.start();
+        thread->start();
+    }
+    void stopWorker() {
+        ++*cancellation;
+        ++*inspection;
+        QObject::disconnect(worker, nullptr, q, nullptr);
+        QMetaObject::invokeMethod(worker, [w = worker] { if (w->sync) w->sync->stop(); if (w->store) w->store->close(); QThread::currentThread()->quit(); });
     }
     ~Private() {
-        ++*cancellation;
-        QMetaObject::invokeMethod(worker, [w = worker] { if (w->sync) w->sync->stop(); if (w->store) w->store->close(); QThread::currentThread()->quit(); });
-        thread.wait();
+        if (shutdown) return; // The thread owns its remaining asynchronous cleanup.
+        stopWorker(); thread->wait(); delete thread;
     }
 };
 Controller::Controller(RequestSender sender, QObject *parent) : QObject(parent), d(std::make_unique<Private>(this, std::move(sender))) {}
@@ -155,9 +179,11 @@ bool Controller::available() const { return d->ready; }
 bool Controller::busy() const { return d->busy; }
 QString Controller::errorString() const { return d->error; }
 void Controller::open(const QString &container, const QString &accountScope) {
-    if (d->path == container && d->scope == accountScope && !accountScope.isEmpty()) return;
+    if (d->shutdown) return;
+    if (d->path == container && d->scope == accountScope && !accountScope.isEmpty() && (d->ready || d->opening)) return;
     const auto revision = ++*d->cancellation;
     d->path = container; d->scope = accountScope; d->ready = false; d->busy = false; d->error.clear();
+    d->opening = !accountScope.isEmpty();
     d->jobs.clear(); d->transportIds.clear(); d->authorized.clear();
     QMetaObject::invokeMethod(d->worker, [w = d->worker, container, accountScope, revision] { w->configure(container, accountScope, revision); });
     emit changed();
@@ -167,18 +193,34 @@ void Controller::close() {
     open({}, {});
 }
 void Controller::closeAndWait() {
+    if (d->shutdown) return;
     close();
     // configure() and any cancelled filesystem operation precede this barrier
     // on the same worker queue. No old replica handle survives the return.
     QMetaObject::invokeMethod(d->worker, [] {}, Qt::BlockingQueuedConnection);
 }
+void Controller::inspectContainer(const QString &container, const QString &accountScope) {
+    if (d->shutdown) return;
+    const auto revision = ++*d->inspection;
+    QMetaObject::invokeMethod(d->worker, [w = d->worker, container, accountScope, revision] { w->inspect(container, accountScope, revision); });
+}
+void Controller::shutdownAsync() {
+    if (d->shutdown) return;
+    d->shutdown = true;
+    d->ready = false; d->busy = false; d->opening = false;
+    d->jobs.clear(); d->transportIds.clear(); d->authorized.clear();
+    QObject::connect(d->thread, &QThread::finished, d->thread, &QObject::deleteLater);
+    d->stopWorker();
+}
 void Controller::setPeers(const QStringList &authorizedPeers, const QStringList &remoteHosts) {
+    if (d->shutdown) return;
     d->authorized = QSet<QString>(authorizedPeers.begin(), authorizedPeers.end());
     QStringList hosts; for (const auto &host : remoteHosts) if (d->authorized.contains(host)) hosts.append(host);
     const auto revision = d->cancellation->load();
     QMetaObject::invokeMethod(d->worker, [w = d->worker, hosts, revision] { w->setHosts(hosts, revision); });
 }
 void Controller::synchronizeNow() {
+    if (d->shutdown) return;
     const auto revision = d->cancellation->load();
     QMetaObject::invokeMethod(d->worker, [w = d->worker, revision] { if (w->generation == revision) w->tick(); });
 }
@@ -219,6 +261,7 @@ QJsonObject Controller::handle(const QString &peer, const QJsonObject &envelope)
     return {{"ok", true}, {"pending", true}};
 }
 void Controller::receive(const QString &transportRequestId, const QJsonObject &response) {
+    if (d->shutdown) return;
     const auto id = d->transportIds.take(transportRequestId); if (id.isEmpty()) return;
     const auto revision = d->cancellation->load();
     QMetaObject::invokeMethod(d->worker, [w = d->worker, revision, id, response] { if (w->generation == revision) w->sync->receive(id, response); });

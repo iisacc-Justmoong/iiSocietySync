@@ -19,6 +19,12 @@ public:
     void close();
     // Desktop process handoff: cancel and drain the worker before releasing a lease.
     void closeAndWait();
+    // Read-only startup/foreground metadata, serialized on the replica worker.
+    // Only the most recent inspection result is delivered on this object's thread.
+    void inspectContainer(const QString &container, const QString &accountScope = {});
+    // Permanently cancel this controller and retire its worker without blocking
+    // the caller. Desktop ownership handoff must still use closeAndWait().
+    void shutdownAsync();
     void setPeers(const QStringList &authorizedPeers, const QStringList &remoteHosts);
     bool available() const;
     bool busy() const;
@@ -31,6 +37,8 @@ signals:
     void changed();
     void synchronized(QString peer);
     void progress(QString path, qint64 completedBytes, qint64 totalBytes);
+    void containerInspected(QString path, QString scope, QJsonObject binding,
+        QString containerIdentifier, QString primaryHost);
 private:
     class Private;
     std::unique_ptr<Private> d;

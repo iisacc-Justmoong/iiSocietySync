@@ -1,4 +1,6 @@
-# iiSocietySync 0.4.0
+# iiSocietySync 0.5.0
+
+`iiSocietyContainer` 0.13.0 이상을 사용한다. `Files/Documents`, `Files/Audios`, `Files/3D objects`는 삭제할 수 없는 기본 디렉터리이다. 최상위 `Photos/`는 `photos` 섹션 키로 사진 객체·프리뷰를 동기화한다. 원격 삭제가 도착해도 빈 기본 폴더를 유지하며 더 높은 로컬 버전으로 기록하여 반복 전송을 처리한다. 해당 경로를 파일로 교체하는 요청은 충돌 사본으로 보존한다. 폴더 내부 항목의 생성·수정·삭제는 기존 동기화 규칙을 따른다. 최초 호스트 채택 시 기본 폴더 내부의 이전 데이터만 복구 영역으로 보관하고 폴더 자체는 유지한다. `Replica` 테스트는 삭제·파일 교체·재전송·자식 삭제·호스트 채택을 검사한다.
 
 서로 다른 기기에서 실행 중인 Society의 컨테이너 데이터를 동기화하는 C++20/Qt SDK이다. 같은 계정의 인증된 Society 연결을 받아 변경 감지, 양방향 전송, 중단 복구, 충돌 보존을 수행한다. `helloWorld()`는 기존 소비자 호환용으로 유지한다.
 
@@ -52,6 +54,8 @@ sync.setPeers(authorizedPeerIds, remoteHostIds);
 ## 저장과 전송
 
 8개 영역의 상대 경로를 동기화한다. 일반 파일·디렉터리와 삭제 기록이 대상이다. 루트의 `.society-drive.json`, `.society-sync/`, 로그인·페어링 그룹 상태, Helper 메시지는 전송하지 않는다. 호스트와 모든 클라이언트의 논리 컨테이너 UUID는 동일하다. replica UUID와 OS 제공자의 내부 등록 ID는 기기마다 유지한다. Finder·Files·공개 `filesHandler`는 계속 `Files/`만 노출한다.
+
+iiSocietyContainer가 새 컨테이너의 `Models/`에 만드는 유형별 빈 폴더도 일반 디렉터리 항목으로 동기화한다. 따라서 파일 변경 수와 페이지 경계 테스트는 컨테이너 초기 스캔의 커서 이후를 비교한다. 초기 폴더의 매니페스트 형식도 검사하며, 첫 미러 복구 테스트는 이전 파일의 비공개 보존과 호스트의 빈 모델 폴더 구조 복원을 함께 확인한다.
 
 `.society-sync/journal.sqlite`는 기기 로컬 메타데이터이며 계정 scope·컨테이너 UUID에 묶인다. 파일별 SHA-256, 벡터 시계, 버전, 증가하는 커서, 삭제 tombstone, 상대 기기의 replica/container ID와 양방향 커서를 저장한다. 실제 파일의 장치·파일 ID·크기·수정/변경 시각이 그대로이면 해시를 다시 계산하지 않는다. 변경 목록은 최대 128항목·약 256 KiB씩 고정된 상한 커서까지 읽는다. 그 이후 변경은 다음 회차에 전송한다. 변경이 없는 회차는 파일 바이트를 보내지 않는다.
 
@@ -111,3 +115,18 @@ iiSocietySync의 자체 작성 코드와 문서는 GNU Affero General Public Lic
 Apple 플랫폼의 대용량 파일 SHA-256은 OS 기본 CommonCrypto를 사용한다. 배포 Qt 6.8.3의 소프트웨어 SHA-256 병목을 줄이면서 해시 형식·파일 핸들/변경 검사·블록별 취소 계약은 유지한다. 추가 패키지나 서버 의존성 없이 macOS/iOS SDK의 시스템 라이브러리를 사용하며 다른 플랫폼은 기존 Qt 경로를 유지한다. 빈 파일·SHA 패딩 경계·1MiB 읽기 경계·바이너리 입력을 Qt의 독립 결과와 비교한다. API 근거는 [Apple CommonCrypto CommonDigest](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/CC_SHA512_Update.3cc.html) 문서이다.
 
 데스크톱 프로세스 소유권을 반환할 때는 Controller::closeAndWait()로 이전 작업의 취소와 파일/DB 핸들 종료를 완료한 뒤 잠금을 넘긴다. 일반 close()는 기존 비동기 취소를 유지한다. Controller 검사는 실제 대용량 파일 스캔 중 반환한 즉시 다음 Replica가 잠금을 획득할 수 있는지 검사한다.
+
+
+## 모바일 비동기 실행 (0.5.0)
+
+`Controller::inspectContainer(path, scope)`는 컨테이너 UUID·미러 바인딩·primary host를 기존 복제 작업 스레드에서 읽고 `containerInspected`로 전달한다. UI에서 `Replica::binding` / `primaryHost`를 직접 호출할 필요가 없다. 조회는 데이터베이스나 복제 디렉터리를 만들지 않으며 새 조회가 들어오면 오래된 결과를 폐기한다. 신호와 `RequestSender`는 Controller 소유 스레드에서 처리하고 파일 시스템 작업은 작업 스레드에서 직렬 실행한다.
+
+`open`의 초기 준비·SQLite·감시 등록·해시·매니페스트·청크 처리는 비동기이다. 초기 열기 실패 후 같은 경로와 계정으로 다시 `open`하여 재시도할 수 있다. 진행 중이거나 준비된 동일 컨테이너는 중복 초기화하지 않는다. `close`는 취소를 요청하고 바로 반환한다. 모바일 객체를 폐기할 때 `shutdownAsync()`를 호출하면 작업 스레드가 자원을 정리하고 스스로 종료한다. 이후 해당 Controller는 다시 열 수 없다. 데스크톱 실행권 인계에는 `closeAndWait()`를 유지한다. 기본 소멸자는 데스크톱 호환성을 위해 작업 정리를 기다린다.
+
+`RemoteFiles`의 목적지 열기·Base64 청크 검사·쓰기·최종 `QSaveFile::commit()`도 별도 작업 스레드에서 수행한다. 저장 중에도 `busy()`를 유지하고 커밋 완료 후에만 `downloadFinished`를 전달한다. 취소와 객체 파괴는 작업을 기다리지 않으며 늦은 콜백을 무효화한다. 실패한 전송은 기존 목적지 파일을 보존한다. 이미 실행 중인 OS 파일 연산은 반환할 때 취소를 확인한다.
+
+0.5.0에서는 RemoteFiles의 소유권 구현과 소멸 경계가 바뀌므로 소비자를 다시 빌드해야 한다. 동적 라이브러리의 ABI 이름은 `0.5`로 분리하며 기존 `0` 라이브러리를 새 구현으로 대체하지 않는다. 동기화 프로토콜 2와 디스크 형식은 유지한다. 기존 Qt Core의 [작업 객체와 queued connection](https://doc.qt.io/qt-6/qthread.html)을 재사용하며 새 외부 의존성은 없다.
+
+`iiSocietySync.Controller`는 비동기 조회·오래된 결과 폐기·초기 실패 후 재시도·1 GiB 검사 중 비동기 종료·데스크톱 실행권 인계·다운로드 성공과 불완전 파일 보존·취소·실제 로컬 TLS 양방향 동기화를 검사한다.
+
+Photos는 Container 0.13.0의 최상위 섹션이다. `allStoreSections()`에서 자동으로 열거하여 일반 섹션 전송·호스트 채택 규칙을 적용한다. 기존 경로 이전은 Container가 수행하며 동기화 참여 기기 모두 새 레이아웃을 사용해야 한다. Society.Photos의 TLS 통합 시험은 `Photos/`의 alias·프리뷰와 원본 채널을 함께 검사한다.

@@ -1,4 +1,5 @@
 #include "Replica.h"
+#include <FileDirectory.h>
 #include "ConfinedFiles.h"
 #include <SocietyDrive.h>
 #include <QCryptographicHash>
@@ -195,13 +196,23 @@ public:
         const auto relation = local.isEmpty() ? 1 : compare(a, b);
         if (relation == 0 && !contentEqual(incoming, local)) return failed("inconsistent_version_clock");
         if (relation <= 0) return result();
-        const auto clock = joined(a, b); if (clock.size() > 64) return failed("replica_clock_limit");
+        auto clock = joined(a, b); if (clock.size() > 64) return failed("replica_clock_limit");
         const bool same = contentEqual(incoming, local);
         // A nonempty local directory must never be replaced by a file/deletion.
         bool retainDirectory = false;
+        const bool fixedDirectory = path.startsWith("files/") && iiSocietyContainer::isFixedFilesDirectory(path.mid(6));
         if (local.value("kind") == "directory" && incoming.value("kind") != "directory") {
-            bool ok; retainDirectory = !files.list(physical(path), &ok).isEmpty();
+            bool ok; const auto children = files.list(physical(path), &ok);
             if (!ok) return failed(files.error);
+            retainDirectory = !children.isEmpty() || fixedDirectory;
+        }
+        if (retainDirectory && fixedDirectory) {
+            // Publish the invariant as a newer directory revision, so replayed
+            // legacy tombstones are acknowledged and cannot stall synchronization.
+            const auto counter = qMax(meta("counter").toLongLong(), clock.value(id).toString().toLongLong()) + 1;
+            if (counter > MaxCounter || (clock.size() == 64 && !clock.contains(id))
+                || !setMeta("counter", QString::number(counter))) return failed("replica_clock_limit");
+            clock.insert(id, QString::number(counter));
         }
         const bool concurrent = relation == 2 || retainDirectory;
         const bool incomingWins = !retainDirectory && (relation == 1 || same || rank(incoming) > rank(local)
@@ -390,10 +401,22 @@ bool Replica::bindHost(const QString &peer, const QString &replica, const QStrin
         const auto native = iiSocietyContainer::storeSectionName(section); bool listed;
         const auto names = d->files.list(native, &listed); if (!listed) { ok = false; break; }
         for (const auto &name : names) {
-            if (++count > 250000) { ok = false; break; }
-            QSqlQuery q(d->db); q.prepare("INSERT INTO detach(path,target) VALUES(?,?)");
-            q.addBindValue(native + '/' + name); q.addBindValue(recovery + '/' + native + '/' + name);
-            if (!q.exec()) { ok = false; break; }
+            QStringList paths{native + '/' + name};
+            if (section == iiSocietyContainer::StoreSection::Files && iiSocietyContainer::isFixedFilesDirectory(name)) {
+                // Archive former contents but keep each fixed directory in place
+                // throughout host adoption, including an interrupted first mirror.
+                paths.clear();
+                const auto children = d->files.list(native + '/' + name, &listed);
+                if (!listed) { ok = false; break; }
+                for (const auto &child : children) paths.append(native + '/' + name + '/' + child);
+            }
+            for (const auto &path : paths) {
+                if (++count > 250000) { ok = false; break; }
+                QSqlQuery q(d->db); q.prepare("INSERT INTO detach(path,target) VALUES(?,?)");
+                q.addBindValue(path); q.addBindValue(recovery + '/' + path);
+                if (!q.exec()) { ok = false; break; }
+            }
+            if (!ok) break;
         }
         if (!ok) break;
     }

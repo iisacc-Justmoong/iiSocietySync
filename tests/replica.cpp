@@ -19,38 +19,108 @@ static QByteArray readFile(const QString &path) { QFile f(path); if (!f.open(QIO
 class ReplicaTests : public QObject {
     Q_OBJECT
 private slots:
+    void fixedDirectoriesSurviveRemoteDeletionReplacementAndReplay() {
+        QTemporaryDir dir(SYNC_TEST_DIRECTORY "/fixed-files-XXXXXX");
+        QVERIFY(iiSocietyContainer::SocietyDrive::create(dir.path()));
+        Replica replica; QVERIFY(replica.open(dir.path(), scope)); QVERIFY(replica.scan());
+        const auto revision = [&](const QString &path, const QString &kind, const QByteArray &bytes = {}) {
+            auto clock = replica.record(path).value("clock").toObject();
+            clock.insert(replica.replicaId(), QString::number(clock.value(replica.replicaId()).toString().toLongLong() + 1));
+            QJsonObject entry{{"path", path}, {"kind", kind}, {"size", QString::number(bytes.size())},
+                {"hash", kind == "file" ? QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex()) : QString()}, {"clock", clock}};
+            entry.insert("version", QString::fromLatin1(QCryptographicHash::hash(QJsonDocument(entry).toJson(QJsonDocument::Compact), QCryptographicHash::Sha256).toHex()));
+            return entry;
+        };
+        for (const auto name : {"Documents", "Audios", "3D objects"}) {
+            const auto path = QString("files/") + name;
+            const auto deleted = revision(path, "deleted"); QVERIFY(Replica::validRecord(deleted));
+            for (int retry = 0; retry < 2; ++retry) {
+                const auto response = replica.handle("legacy", {{"action", "apply"}, {"entry", deleted}});
+                QVERIFY2(response.value("ok").toBool(), qPrintable(QJsonDocument(response).toJson()));
+                QVERIFY(response.value("complete").toBool());
+                QVERIFY(QFileInfo(dir.filePath("Files/" + QString(name))).isDir());
+                QCOMPARE(replica.record(path).value("kind"), "directory");
+            }
+        }
+        const QByteArray contents("preserved legacy file");
+        const auto replacement = revision("files/Documents", "file", contents);
+        QVERIFY(Replica::validRecord(replacement));
+        auto response = replica.handle("legacy", {{"action", "begin"}, {"entry", replacement}});
+        QVERIFY(response.value("ok").toBool()); QVERIFY(!response.value("complete").toBool());
+        QVERIFY(replica.handle("legacy", {{"action", "chunk"}, {"entry", replacement}, {"offset", "0"}, {"data", QString::fromLatin1(contents.toBase64())}}).value("ok").toBool());
+        QVERIFY(replica.handle("legacy", {{"action", "commit"}, {"entry", replacement}}).value("ok").toBool());
+        QVERIFY(QFileInfo(dir.filePath("Files/Documents")).isDir());
+        QCOMPARE(replica.record("files/Documents").value("kind"), "directory");
+        const auto copies = QDir(dir.filePath("Files")).entryList({"Documents.sync-conflict-*"}, QDir::Files);
+        QCOMPARE(copies.size(), 1); QCOMPARE(readFile(dir.filePath("Files/" + copies.first())), contents);
+        QVERIFY(replica.handle("legacy", {{"action", "begin"}, {"entry", replacement}}).value("complete").toBool());
+        writeFile(dir.filePath("Files/Documents/movie.mp4"), "editable video"); QVERIFY(replica.scan());
+        const auto child = revision("files/Documents/movie.mp4", "deleted");
+        QVERIFY(replica.handle("legacy", {{"action", "apply"}, {"entry", child}}).value("ok").toBool());
+        QVERIFY(!QFileInfo::exists(dir.filePath("Files/Documents/movie.mp4")));
+        QVERIFY(QFileInfo(dir.filePath("Files/Documents")).isDir());
+    }
+
+    void hostAdoptionKeepsFixedDirectoriesAndArchivesTheirContents() {
+        QTemporaryDir local(SYNC_TEST_DIRECTORY "/fixed-adoption-XXXXXX"), host(SYNC_TEST_DIRECTORY "/fixed-host-XXXXXX");
+        QVERIFY(iiSocietyContainer::SocietyDrive::create(local.path()));
+        QVERIFY(iiSocietyContainer::SocietyDrive::create(host.path()));
+        writeFile(local.filePath("Files/Documents/old.mp4"), "local video");
+        Replica client, remote; QVERIFY(client.open(local.path(), scope)); QVERIFY(remote.open(host.path(), scope));
+        QVERIFY(client.bindHost("host", remote.replicaId(), remote.containerId()));
+        const auto recovery = client.binding().value("recovery").toString(); QVERIFY(!recovery.isEmpty());
+        QCOMPARE(readFile(local.filePath(recovery + "/Files/Documents/old.mp4")), "local video");
+        QVERIFY(!QFileInfo::exists(local.filePath("Files/Documents/old.mp4")));
+        QVERIFY(client.bootstrapping());
+        for (const auto name : {"Documents", "Audios", "3D objects"})
+            QVERIFY(QFileInfo(local.filePath("Files/" + QString(name))).isDir());
+        client.close(); QVERIFY(client.open(local.path(), scope));
+        QVERIFY(client.completeBootstrap());
+        QVERIFY(iiSocietyContainer::SocietyDrive::open(local.path())->isReady());
+    }
     void manifestHashAndOrderingAreCheckedWithoutWritingFileBytes() {
         QTemporaryDir a(SYNC_TEST_DIRECTORY "/manifest-source-XXXXXX"), b(SYNC_TEST_DIRECTORY "/manifest-host-XXXXXX");
         QVERIFY(iiSocietyContainer::SocietyDrive::create(a.path())); QVERIFY(iiSocietyContainer::SocietyDrive::create(b.path()));
-        writeFile(a.filePath("Files/one"), "first"); writeFile(a.filePath("Files/two"), "second");
         Replica sender, host; QVERIFY(sender.open(a.path(), scope)); QVERIFY(host.open(b.path(), scope)); QVERIFY(sender.scan());
-        const auto changes = sender.changes(); const auto entries = changes.value("entries").toArray(); QCOMPARE(entries.size(), 2);
+        const auto baseline = sender.changes().value("through").toString().toLongLong();
+        writeFile(a.filePath("Files/one"), "first"); writeFile(a.filePath("Files/two"), "second");
+        QVERIFY(sender.scan());
+        const auto changes = sender.changes(baseline); const auto entries = changes.value("entries").toArray(); QCOMPARE(entries.size(), 2);
         QByteArray records; for (const auto &entry : entries) records += QJsonDocument(entry.toObject()).toJson(QJsonDocument::Compact) + '\n';
         const auto id = QString::fromLatin1(QCryptographicHash::hash(records, QCryptographicHash::Sha256).toHex());
         QJsonObject page{{"action", "manifest"}, {"container", host.containerId()}, {"replica", sender.replicaId()}, {"manifest", id},
-            {"offset", "0"}, {"total", "2"}, {"after", "0"}, {"through", changes.value("through")}, {"entries", QJsonArray{entries[0]}}};
+            {"offset", "0"}, {"total", "2"}, {"after", QString::number(baseline)}, {"through", changes.value("through")}, {"entries", QJsonArray{entries[0]}}};
         auto response = host.handle("sender", page); QVERIFY(response.value("ok").toBool()); QVERIFY(!response.value("complete").toBool());
         QCOMPARE(host.handle("sender", {{"action", "begin"}, {"manifest", id}, {"entry", entries[0]}}).value("error"), "manifest_required_before_transfer");
         auto outOfOrder = page; outOfOrder.insert("offset", "2"); outOfOrder.insert("entries", QJsonArray{});
         QVERIFY(!host.handle("sender", outOfOrder).value("ok").toBool());
         page.insert("offset", "1"); page.insert("entries", QJsonArray{entries[1]});
         response = host.handle("sender", page); QVERIFY(response.value("ok").toBool()); QVERIFY(response.value("complete").toBool());
-        QVERIFY(QDir(b.filePath("Files")).isEmpty()); QVERIFY(host.record("files/one").isEmpty());
+        QCOMPARE(QDir(b.filePath("Files")).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size(), 3); QVERIFY(host.record("files/one").isEmpty());
         QCOMPARE(host.changes().value("through").toString(), "0");
         page.insert("offset", "0"); page.insert("entries", entries); page.insert("manifest", QString(64, 'f'));
         QCOMPARE(host.handle("sender", page).value("error"), "manifest_hash_mismatch");
-        QVERIFY(QDir(b.filePath("Files")).isEmpty());
+        QCOMPARE(QDir(b.filePath("Files")).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size(), 3);
     }
     void sectionInventoryAndLocalBoundary() {
         QTemporaryDir dir(SYNC_TEST_DIRECTORY "/replica-XXXXXX");
         QVERIFY(iiSocietyContainer::SocietyDrive::create(dir.path()));
+        Replica replica; QVERIFY2(replica.open(dir.path(), scope), qPrintable(replica.errorString()));
+        QVERIFY2(replica.scan(), qPrintable(replica.errorString()));
+        const auto initial = replica.changes();
+        for (const auto &value : initial.value("entries").toArray()) {
+            const auto entry = value.toObject(); QVERIFY(Replica::validRecord(entry));
+            QCOMPARE(entry.value("kind").toString(), "directory");
+            const auto path = entry.value("path").toString();
+            QVERIFY((path.startsWith("models/") || QStringList{"files/Documents", "files/Audios", "files/3D objects"}.contains(path)));
+        }
+        const auto baseline = initial.value("through").toString().toLongLong();
         for (const auto section : iiSocietyContainer::allStoreSections())
             writeFile(dir.filePath(iiSocietyContainer::storeSectionName(section) + "/one.txt"), "data");
         writeFile(dir.filePath("private-cookie.json"), "must not cross devices");
-        Replica replica; QVERIFY2(replica.open(dir.path(), scope), qPrintable(replica.errorString()));
         QVERIFY2(replica.scan(), qPrintable(replica.errorString()));
-        const auto manifest = replica.changes(); QVERIFY(manifest.value("ok").toBool());
-        QCOMPARE(manifest.value("entries").toArray().size(), 8);
+        const auto manifest = replica.changes(baseline); QVERIFY(manifest.value("ok").toBool());
+        QCOMPARE(manifest.value("entries").toArray().size(), 9);
         for (const auto &value : manifest.value("entries").toArray()) QVERIFY(Replica::validRecord(value.toObject()));
         QVERIFY(replica.record("private-cookie.json").isEmpty());
         const auto id = replica.replicaId(); replica.close();
@@ -100,6 +170,8 @@ private slots:
         QTemporaryDir a(SYNC_TEST_DIRECTORY "/hash-a-XXXXXX"), b(SYNC_TEST_DIRECTORY "/hash-b-XXXXXX");
         QVERIFY(iiSocietyContainer::SocietyDrive::create(a.path())); QVERIFY(iiSocietyContainer::SocietyDrive::create(b.path()));
         Replica source, target; QVERIFY(source.open(a.path(), scope)); QVERIFY(target.open(b.path(), scope));
+        QVERIFY(target.scan());
+        const auto baseline = target.changes().value("through").toString().toLongLong();
         auto transfer = [&](const QByteArray &data, bool corrupt) {
             writeFile(a.filePath("Files/item"), data); QVERIFY(source.scan());
             const auto entry = source.record("files/item");
@@ -120,7 +192,7 @@ private slots:
         const auto metadata = QJsonDocument::fromJson(readFile(recovery.filePath(metadataFiles[0]))).object();
         QCOMPARE(metadata.value("path").toString(), "Files/item");
         QCOMPARE(readFile(b.filePath(metadata.value("backup").toString())), QByteArray("original"));
-        QVERIFY(target.scan()); QCOMPARE(target.changes().value("entries").toArray().size(), 1);
+        QVERIFY(target.scan()); QCOMPARE(target.changes(baseline).value("entries").toArray().size(), 1);
     }
     void redirectedFilesAndReplacedContainerFailClosed() {
         QTemporaryDir parent(SYNC_TEST_DIRECTORY "/boundary-XXXXXX");
@@ -172,9 +244,11 @@ private slots:
     void manifestPagesKeepAStableCursorWhileNewChangesWaitForNextCycle() {
         QTemporaryDir root(SYNC_TEST_DIRECTORY "/pages-XXXXXX");
         QVERIFY(iiSocietyContainer::SocietyDrive::create(root.path()));
-        for (int i = 0; i < 260; ++i) writeFile(root.filePath("Files/" + QString::number(i)), "data");
         Replica replica; QVERIFY(replica.open(root.path(), scope)); QVERIFY(replica.scan());
-        auto page = replica.changes(); QCOMPARE(page.value("entries").toArray().size(), 128);
+        const auto baseline = replica.changes().value("through").toString().toLongLong();
+        for (int i = 0; i < 260; ++i) writeFile(root.filePath("Files/" + QString::number(i)), "data");
+        QVERIFY(replica.scan());
+        auto page = replica.changes(baseline); QCOMPARE(page.value("entries").toArray().size(), 128);
         const auto upper = page.value("through").toString().toLongLong();
         writeFile(root.filePath("Files/259"), "changed after page one"); QVERIFY(replica.scan());
         QSet<QString> paths;

@@ -189,7 +189,15 @@ private slots:
         cycle(client, host); QCOMPARE(client.containerId(), host.containerId());
         QCOMPARE(get(a.filePath(recovery + "/Files/one")), QByteArray("one"));
         QCOMPARE(get(a.filePath(recovery + "/Models/two")), QByteArray("two"));
-        QVERIFY(QDir(a.filePath("Files")).isEmpty()); QVERIFY(QDir(a.filePath("Models")).isEmpty());
+        QCOMPARE(QDir(a.filePath("Files")).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size(), 3);
+        const QDir clientModels(a.filePath("Models")), hostModels(b.filePath("Models"));
+        const auto modelFolders = hostModels.entryList(QDir::AllEntries | QDir::NoDotAndDotDot, QDir::Name);
+        QCOMPARE(clientModels.entryList(QDir::AllEntries | QDir::NoDotAndDotDot, QDir::Name), modelFolders);
+        for (const auto &folder : modelFolders) {
+            QVERIFY(QFileInfo(clientModels.filePath(folder)).isDir());
+            QVERIFY(QDir(clientModels.filePath(folder)).isEmpty());
+        }
+        QVERIFY(!QFileInfo::exists(a.filePath("Models/two")));
     }
     void bootstrapCatchesHostChangesBeforePublishingTheMirror() {
         QTemporaryDir a(SYNC_TEST_DIRECTORY "/catchup-a-XXXXXX"), b(SYNC_TEST_DIRECTORY "/catchup-b-XXXXXX");
@@ -221,7 +229,7 @@ private slots:
         QVERIFY(iiSocietyContainer::SocietyDrive::create(a.path())); QVERIFY(iiSocietyContainer::SocietyDrive::create(b.path())); QVERIFY(iiSocietyContainer::SocietyDrive::create(c.path()));
         put(a.filePath("Files/independent"), "legacy");
         Replica client, host, replacement; QVERIFY(client.open(a.path(), QString(64, 'a'))); QVERIFY(host.open(b.path(), QString(64, 'a')));
-        cycle(client, host); QVERIFY(QDir(a.filePath("Files")).isEmpty());
+        cycle(client, host); QCOMPARE(QDir(a.filePath("Files")).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size(), 3);
         put(a.filePath("Files/pending"), "offline edit for old drive"); put(c.filePath("Files/new-host"), "new drive");
         QVERIFY(replacement.open(c.path(), QString(64, 'a'))); cycle(client, replacement);
         QCOMPARE(client.containerId(), replacement.containerId());

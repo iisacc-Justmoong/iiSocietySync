@@ -7,11 +7,96 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QUuid>
+#include <QElapsedTimer>
+#include <QThread>
 
 using namespace iiSocietySync;
 class ControllerTests : public QObject {
     Q_OBJECT
 private slots:
+    void failedStartupCanRetryTheSameContainer() {
+        QTemporaryDir root(SYNC_TEST_DIRECTORY "/startup-retry-XXXXXX");
+        const auto path = root.filePath("later"); const QString scope(64, 'a');
+        Controller sync({}); sync.open(path, scope);
+        QTRY_VERIFY(!sync.errorString().isEmpty()); QVERIFY(!sync.available());
+        QVERIFY(QDir().mkpath(path));
+        QVERIFY(iiSocietyContainer::SocietyDrive::create(path));
+        sync.open(path, scope);
+        QTRY_VERIFY2(sync.available(), qPrintable(sync.errorString()));
+        QVERIFY(sync.errorString().isEmpty());
+    }
+    void remoteDownloadsOpenWriteAndCommitAsynchronously() {
+        QTemporaryDir root(SYNC_TEST_DIRECTORY "/async-download-XXXXXX");
+        QList<QPair<QString, QJsonObject>> requests;
+        RemoteFiles remote([&](const QString &, const QJsonObject &payload) {
+            const auto id = QUuid::createUuid().toString(); requests.append({id, payload}); return id;
+        });
+        remote.browse("desktop");
+        remote.receive(requests.last().first, {{"ok", true}, {"entries", QJsonArray{}}}, "local");
+        QSignalSpy completed(&remote, &RemoteFiles::downloadFinished);
+        const auto destination = QUrl::fromLocalFile(root.filePath("result"));
+        remote.download("remote", destination);
+        QCOMPARE(requests.size(), 1); // Opening the destination cannot synchronously call the transport.
+        QVERIFY(remote.busy());
+        QTRY_COMPARE(requests.size(), 2);
+        QCOMPARE(requests.last().second.value("op").toString(), "stat");
+        remote.receive(requests.last().first, {{"ok", true}, {"size", "6"}, {"version", "v1"}}, "local");
+        QCOMPARE(requests.last().second.value("op").toString(), "read");
+        remote.receive(requests.last().first, {{"ok", true}, {"data", "YWJjZGVm"}, {"offset", "0"},
+            {"size", "6"}, {"version", "v1"}, {"eof", true}}, "local");
+        QVERIFY(remote.busy()); QVERIFY(completed.isEmpty());
+        QTRY_COMPARE(completed.size(), 1); QVERIFY(!remote.busy());
+        QFile file(destination.toLocalFile()); QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), "abcdef"); file.close();
+
+        remote.download("remote", destination);
+        QTRY_COMPARE(requests.last().second.value("op").toString(), "stat");
+        remote.receive(requests.last().first, {{"ok", true}, {"size", "6"}, {"version", "v1"}}, "local");
+        remote.receive(requests.last().first, {{"ok", true}, {"data", "eHl6"}, {"offset", "0"},
+            {"size", "6"}, {"version", "v1"}, {"eof", true}}, "local");
+        QTRY_VERIFY(!remote.busy()); QCOMPARE(completed.size(), 1);
+        QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), "abcdef"); file.close();
+
+        const auto sent = requests.size();
+        remote.download("cancelled", destination); remote.reset();
+        QTest::qWait(30); QCOMPARE(requests.size(), sent); QCOMPARE(completed.size(), 1);
+        QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), "abcdef");
+    }
+    void inspectionsAreQueuedReadOnlyAndDiscardSupersededContainers() {
+        QTemporaryDir first(SYNC_TEST_DIRECTORY "/inspect-first-XXXXXX"), second(SYNC_TEST_DIRECTORY "/inspect-next-XXXXXX");
+        QVERIFY(iiSocietyContainer::SocietyDrive::create(first.path()));
+        const auto drive = iiSocietyContainer::SocietyDrive::create(second.path()); QVERIFY(drive);
+        Controller sync({}); QSignalSpy inspected(&sync, &Controller::containerInspected);
+        connect(&sync, &Controller::containerInspected, this, [this] { QCOMPARE(QThread::currentThread(), thread()); });
+        sync.inspectContainer(first.path(), QString(64, 'a'));
+        sync.inspectContainer(second.path(), QString(64, 'b'));
+        QVERIFY(inspected.isEmpty());
+        QTRY_COMPARE(inspected.size(), 1);
+        QCOMPARE(inspected[0][0].toString(), second.path());
+        QCOMPARE(inspected[0][1].toString(), QString(64, 'b'));
+        QCOMPARE(inspected[0][3].toString(), drive->identifier());
+        QVERIFY(!QFileInfo::exists(second.filePath(".society-sync"))); // No replica/database creation for a UI snapshot.
+        sync.inspectContainer(first.path(), {});
+        sync.shutdownAsync();
+        QTest::qWait(20); QCOMPARE(inspected.size(), 1);
+        sync.open(second.path(), QString(64, 'b')); QVERIFY(!sync.available());
+    }
+    void asynchronousShutdownDoesNotWaitForAnActiveScan() {
+        QTemporaryDir root(SYNC_TEST_DIRECTORY "/async-stop-XXXXXX");
+        const auto drive = iiSocietyContainer::SocietyDrive::create(root.path()); QVERIFY(drive);
+        QFile file(root.filePath("Models/large")); QVERIFY(file.open(QIODevice::WriteOnly));
+        QVERIFY(file.resize(1024LL * 1024 * 1024)); file.close();
+        auto sync = std::make_unique<Controller>(RequestSender{});
+        const QString scope(64, 'a'); sync->open(root.path(), scope); QTRY_VERIFY(sync->available());
+        sync->setPeers({"trusted"}, {});
+        QVERIFY(sync->handle("trusted", {{"op", "society.sync"}, {"protocol", 2}, {"scope", scope},
+            {"token", QUuid::createUuid().toString(QUuid::WithoutBraces)},
+            {"message", QJsonObject{{"action", "changes"}, {"container", drive->identifier()}}}}).value("pending").toBool());
+        QTRY_VERIFY(QFileInfo::exists(root.filePath(".society-sync/operation.lock")));
+        QElapsedTimer elapsed; elapsed.start(); sync->shutdownAsync(); sync.reset();
+        QVERIFY2(elapsed.elapsed() < 100, "Mobile shutdown waited for the replica worker");
+        QTRY_VERIFY(!QFileInfo::exists(root.filePath(".society-sync/operation.lock")));
+        Replica next; QVERIFY(next.open(root.path(), scope));
+    }
     void processHandoffDrainsAnActiveFileScan() {
         QTemporaryDir root(SYNC_TEST_DIRECTORY "/handoff-XXXXXX");
         const auto drive = iiSocietyContainer::SocietyDrive::create(root.path()); QVERIFY(drive);
@@ -34,7 +119,13 @@ private slots:
         QVERIFY(iiSocietyContainer::SocietyDrive::create(root.path()));
         QFile model(root.filePath("Models/private")); QVERIFY(model.open(QIODevice::WriteOnly)); model.write("model"); model.close();
         const auto files = filesHandler(root.path());
-        QVERIFY(files("peer", {{"op", "list"}, {"path", ""}}).value("entries").toArray().isEmpty());
+        const auto defaults = files("peer", {{"op", "list"}, {"path", ""}}).value("entries").toArray();
+        QSet<QString> names;
+        for (const auto &entry : defaults) {
+            names.insert(entry.toObject().value("name").toString());
+            QVERIFY(entry.toObject().value("directory").toBool());
+        }
+        QCOMPARE(names, (QSet<QString>{"Documents", "Audios", "3D objects"}));
         QVERIFY(!files("peer", {{"op", "list"}, {"path", "../Models"}}).value("ok").toBool());
         QVERIFY(!files("peer", {{"op", "stat"}, {"path", QJsonArray{}}}).value("ok").toBool());
         QVERIFY(!files("peer", {{"op", "list"}, {"cursor", "-1"}}).value("ok").toBool());
@@ -57,7 +148,7 @@ private slots:
         auto page = files("peer", {{"op", "list"}, {"path", ""}}); QVERIFY(page.value("ok").toBool());
         QCOMPARE(page.value("entries").toArray().size(), 256); QVERIFY(!page.value("nextCursor").toString().isEmpty());
         auto next = files("peer", {{"op", "list"}, {"path", ""}, {"cursor", page.value("nextCursor")}});
-        QCOMPARE(next.value("entries").toArray().size(), 5); QVERIFY(next.value("nextCursor").toString().isEmpty());
+        QCOMPARE(next.value("entries").toArray().size(), 8); QVERIFY(next.value("nextCursor").toString().isEmpty());
         for (const auto &entry : page.value("entries").toArray() + next.value("entries").toArray())
             QVERIFY(entry.toObject().value("name").toString() != "link");
         QVERIFY(removeNativeTestLink(root.filePath("Files/link")));

@@ -1,7 +1,6 @@
 #pragma once
 #include "Controller.h"
 #include <iiServerHost.h>
-#include <QSaveFile>
 #include <QUrl>
 #include <QVariantList>
 
@@ -14,7 +13,8 @@ class IISOCIETYSYNC_EXPORT RemoteFiles final : public QObject {
     Q_OBJECT
 public:
     explicit RemoteFiles(RequestSender send, QObject *parent = nullptr);
-    bool busy() const { return !m_request.isEmpty(); }
+    ~RemoteFiles() override;
+    bool busy() const { return m_download || !m_request.isEmpty(); }
     QString status() const { return m_status; }
     QString host() const { return m_host; }
     QString path() const { return m_path; }
@@ -38,6 +38,7 @@ private:
     QVariantList m_entries;
     QString m_request, m_operation, m_downloadPath, m_version;
     qint64 m_received = 0, m_expected = 0;
-    std::unique_ptr<QSaveFile> m_download;
+    class Download;
+    std::unique_ptr<Download> m_download;
 };
 }

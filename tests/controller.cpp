@@ -9,11 +9,23 @@
 #include <QUuid>
 #include <QElapsedTimer>
 #include <QThread>
+#include <QLockFile>
 
 using namespace iiSocietySync;
 class ControllerTests : public QObject {
     Q_OBJECT
 private slots:
+    void hostSelectionRetriesTheLocalOperationLockWithoutBlockingTheCaller() {
+        QTemporaryDir root(SYNC_TEST_DIRECTORY "/primary-claim-XXXXXX");
+        QVERIFY(iiSocietyContainer::SocietyDrive::create(root.path())); const QString scope(64, 'a');
+        Controller sync({}); sync.open(root.path(), scope); QTRY_VERIFY(sync.available());
+        QLockFile lock(root.filePath(".society-sync/operation.lock")); lock.setStaleLockTime(0); QVERIFY(lock.tryLock(3000));
+        QElapsedTimer elapsed; elapsed.start(); sync.claimPrimaryHost("desktop"); QVERIFY(elapsed.elapsed() < 100);
+        QTRY_COMPARE(sync.errorString(), QString("primary_host_unavailable"));
+        QVERIFY(Replica::primaryHost(root.path(), scope).isEmpty());
+        lock.unlock(); QTRY_COMPARE(Replica::primaryHost(root.path(), scope), QString("desktop"));
+        QTRY_VERIFY(sync.errorString().isEmpty()); sync.closeAndWait();
+    }
     void failedStartupCanRetryTheSameContainer() {
         QTemporaryDir root(SYNC_TEST_DIRECTORY "/startup-retry-XXXXXX");
         const auto path = root.filePath("later"); const QString scope(64, 'a');
@@ -86,12 +98,13 @@ private slots:
         QFile file(root.filePath("Models/large")); QVERIFY(file.open(QIODevice::WriteOnly));
         QVERIFY(file.resize(1024LL * 1024 * 1024)); file.close();
         auto sync = std::make_unique<Controller>(RequestSender{});
+        QSignalSpy verification(sync.get(), &Controller::verificationProgress);
         const QString scope(64, 'a'); sync->open(root.path(), scope); QTRY_VERIFY(sync->available());
         sync->setPeers({"trusted"}, {});
-        QVERIFY(sync->handle("trusted", {{"op", "society.sync"}, {"protocol", 2}, {"scope", scope},
+        QVERIFY(sync->handle("trusted", {{"op", "society.sync"}, {"protocol", 2}, {"namespaceVersion", 1}, {"scope", scope},
             {"token", QUuid::createUuid().toString(QUuid::WithoutBraces)},
             {"message", QJsonObject{{"action", "changes"}, {"container", drive->identifier()}}}}).value("pending").toBool());
-        QTRY_VERIFY(QFileInfo::exists(root.filePath(".society-sync/operation.lock")));
+        QTRY_VERIFY(!verification.isEmpty());
         QElapsedTimer elapsed; elapsed.start(); sync->shutdownAsync(); sync.reset();
         QVERIFY2(elapsed.elapsed() < 100, "Mobile shutdown waited for the replica worker");
         QTRY_VERIFY(!QFileInfo::exists(root.filePath(".society-sync/operation.lock")));
@@ -102,13 +115,14 @@ private slots:
         const auto drive = iiSocietyContainer::SocietyDrive::create(root.path()); QVERIFY(drive);
         QFile file(root.filePath("Models/large")); QVERIFY(file.open(QIODevice::WriteOnly));
         QVERIFY(file.resize(1024LL * 1024 * 1024)); file.close();
-        Controller sync({}); const QString scope(64, 'a'); sync.open(root.path(), scope); QTRY_VERIFY(sync.available());
+        Controller sync({}); QSignalSpy verification(&sync, &Controller::verificationProgress);
+        const QString scope(64, 'a'); sync.open(root.path(), scope); QTRY_VERIFY(sync.available());
         sync.setPeers({"trusted"}, {});
-        const QJsonObject request{{"op", "society.sync"}, {"protocol", 2}, {"scope", scope},
+        const QJsonObject request{{"op", "society.sync"}, {"protocol", 2}, {"namespaceVersion", 1}, {"scope", scope},
             {"token", QUuid::createUuid().toString(QUuid::WithoutBraces)},
             {"message", QJsonObject{{"action", "changes"}, {"container", drive->identifier()}}}};
         QVERIFY(sync.handle("trusted", request).value("pending").toBool());
-        QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(root.filePath(".society-sync/operation.lock")), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!verification.isEmpty(), 5000);
         sync.closeAndWait(); QVERIFY(!sync.available());
         QVERIFY(!QFileInfo::exists(root.filePath(".society-sync/operation.lock")));
         Replica successor; QVERIFY2(successor.open(root.path(), scope), qPrintable(successor.errorString()));
@@ -156,14 +170,25 @@ private slots:
     void endpointRequiresTheAuthenticatedPeerAndRejectsTokenMutation() {
         QTemporaryDir root(SYNC_TEST_DIRECTORY "/endpoint-XXXXXX"); QVERIFY(iiSocietyContainer::SocietyDrive::create(root.path()));
         Controller sync({}); sync.open(root.path(), QString(64, 'a')); QTRY_VERIFY(sync.available());
-        QJsonObject message{{"op", "society.sync"}, {"protocol", 2}, {"scope", QString(64, 'a')},
+        QFile payload(root.filePath("Models/progress")); QVERIFY(payload.open(QIODevice::WriteOnly));
+        payload.write(QByteArray(2 * 1024 * 1024 + 51, 'p')); payload.close();
+        QSignalSpy verification(&sync, &Controller::verificationProgress);
+        connect(&sync, &Controller::verificationProgress, this, [this] { QCOMPARE(QThread::currentThread(), thread()); });
+        QJsonObject message{{"op", "society.sync"}, {"protocol", 2}, {"namespaceVersion", 1}, {"scope", QString(64, 'a')},
             {"token", QUuid::createUuid().toString(QUuid::WithoutBraces)}, {"message", QJsonObject{{"action", "changes"}, {"container", iiSocietyContainer::SocietyDrive::open(root.path())->identifier()}}}};
         QVERIFY(!sync.handle("other", message).value("ok").toBool());
         sync.setPeers({"trusted"}, {});
+        auto legacy = message; legacy.remove("namespaceVersion");
+        QCOMPARE(sync.handle("trusted", legacy).value("error"), "namespace_authority_protocol_required");
+        auto forged = message; forged.insert("message", QJsonObject{{"action", "begin"}, {"entry", QJsonObject{{"revision", QString(64, 'f')}}}});
+        QCOMPARE(sync.handle("trusted", forged).value("error"), "namespace_proposal_required");
         auto otherScope = message; otherScope.insert("scope", QString(64, 'b'));
         QVERIFY(!sync.handle("trusted", otherScope).value("ok").toBool());
         QVERIFY(sync.handle("trusted", message).value("pending").toBool());
         QTRY_VERIFY(sync.handle("trusted", message).value("result").toObject().value("ok").toBool());
+        QTRY_VERIFY(verification.size() >= 2);
+        QCOMPARE(verification.last()[1].toLongLong(), qint64(2 * 1024 * 1024 + 51));
+        QCOMPARE(verification.last()[1], verification.last()[2]);
         auto changed = message; changed.insert("message", QJsonObject{{"action", "changes"}, {"container", iiSocietyContainer::SocietyDrive::open(root.path())->identifier()}, {"after", "1"}});
         QCOMPARE(sync.handle("trusted", changed).value("error").toString(), "different_request_token_reuse");
         sync.close(); QVERIFY(!sync.available()); QVERIFY(!sync.handle("trusted", message).value("ok").toBool());
@@ -175,6 +200,7 @@ private slots:
         QFile local(mobile.filePath("Files/mobile.txt")); QVERIFY(local.open(QIODevice::WriteOnly)); local.write("mobile edit"); local.close();
         iiServerHost::LanPeer host, client;
         Controller hosting({}), syncing([&](const auto &peer, const auto &message) { return client.request(peer, message); });
+        syncing.setContentPolicy(Synchronizer::ContentPolicy::FullReplica);
         const auto files = filesHandler(root.path());
         QVERIFY(host.startHost("desktop", "Desktop", [&](const auto &peer, const auto &message) {
             return message.value("op") == "society.sync" ? hosting.handle(peer, message) : files(peer, message);
@@ -192,6 +218,9 @@ private slots:
         QSignalSpy completed(&syncing, &Controller::synchronized);
         syncing.setPeers({"desktop"}, {"desktop"});
         QTRY_VERIFY2_WITH_TIMEOUT(completed.size() > 0, qPrintable(syncing.errorString()), 30000);
+        // A completed snapshot can precede the authority's next indexing batch.
+        // Wait for the actual payload, not the first empty metadata round trip.
+        QTRY_VERIFY2_WITH_TIMEOUT(QFileInfo::exists(mobile.filePath("Models/host.bin")), qPrintable(syncing.errorString()), 30000);
         QFile copy(mobile.filePath("Models/host.bin")); QVERIFY(copy.open(QIODevice::ReadOnly)); QCOMPARE(copy.readAll(), QByteArray(700000, 'h'));
         QCOMPARE(iiSocietyContainer::SocietyDrive::open(mobile.path())->identifier(), iiSocietyContainer::SocietyDrive::open(root.path())->identifier());
         QVERIFY(!QFileInfo::exists(root.filePath("Files/mobile.txt")));
@@ -201,8 +230,13 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(root.filePath("Files/mobile.txt")), 1800);
         QFile uploaded(root.filePath("Files/mobile.txt")); QVERIFY(uploaded.open(QIODevice::ReadOnly)); QCOMPARE(uploaded.readAll(), QByteArray("mobile edit"));
         uploaded.close();
+        // Host file visibility precedes the canonical revision round trip.
+        // Measure each idle filesystem event after that round trip completes;
+        // NamespaceTests separately edits during the upload acknowledgement.
+        QTRY_VERIFY_WITH_TIMEOUT(!completed.isEmpty(), 30000); completed.clear();
         QVERIFY(local.open(QIODevice::WriteOnly | QIODevice::Truncate)); local.write("same file changed"); local.close();
         QTRY_VERIFY_WITH_TIMEOUT(([&] { QFile f(root.filePath("Files/mobile.txt")); return f.open(QIODevice::ReadOnly) && f.readAll() == "same file changed"; })(), 1800);
+        QTRY_VERIFY_WITH_TIMEOUT(!completed.isEmpty(), 30000);
         QFile hostEdit(root.filePath("Files/host-edit")); QVERIFY(hostEdit.open(QIODevice::WriteOnly)); hostEdit.write("host event"); hostEdit.close();
         QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(mobile.filePath("Files/host-edit")), 1800);
         QVERIFY(!client.hosting());

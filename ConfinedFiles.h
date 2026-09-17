@@ -10,6 +10,7 @@ class ConfinedFiles final {
 public:
     QString root, error;
     std::function<bool()> cancelled;
+    std::function<void(const QString &, qint64, qint64)> hashProgress;
     bool open(const QString &path);
     bool intact();
     bool state(const QString &path, FileState *value);

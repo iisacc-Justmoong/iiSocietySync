@@ -13,6 +13,13 @@ public:
     bool start(const QString &peer);
     void stop();
     bool busy() const;
+    // FullReplica remains available for explicit backup/replica consumers.
+    // Society interactive clients use MetadataFirst.
+    enum class ContentPolicy { FullReplica, MetadataFirst };
+    bool setContentPolicy(ContentPolicy policy);
+    // Bound memory and outstanding chunk requests. Negotiated down to one for
+    // older hosts; may only change while idle. TCP preserves upload order.
+    bool setTransferWindow(int chunks);
     void receive(const QString &requestId, const QJsonObject &response);
 signals:
     void mirrorChanged(QJsonObject binding);

@@ -162,6 +162,8 @@ QString ConfinedFiles::hash(const QString &path, const QString &expected) {
     QCryptographicHash hash(QCryptographicHash::Sha256);
 #endif
     QByteArray buffer(1024 * 1024, Qt::Uninitialized);
+    qint64 processed = 0;
+    if (hashProgress) hashProgress(path, 0, s.st_size);
     while (true) {
         if (cancelled && cancelled()) { fail("cancelled"); return {}; }
         const auto size = ::read(fd.fd, buffer.data(), buffer.size());
@@ -172,6 +174,8 @@ QString ConfinedFiles::hash(const QString &path, const QString &expected) {
 #else
         hash.addData(QByteArrayView(buffer.constData(), size));
 #endif
+        processed += size;
+        if (hashProgress) hashProgress(path, processed, s.st_size);
     }
     if (::fstat(fd.fd, &s) || stamp(s) != before) { fail("file_changed"); return {}; }
 #ifdef Q_OS_DARWIN

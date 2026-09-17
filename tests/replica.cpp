@@ -85,7 +85,12 @@ private slots:
         const auto baseline = sender.changes().value("through").toString().toLongLong();
         writeFile(a.filePath("Files/one"), "first"); writeFile(a.filePath("Files/two"), "second");
         QVERIFY(sender.scan());
-        const auto changes = sender.changes(baseline); const auto entries = changes.value("entries").toArray(); QCOMPARE(entries.size(), 2);
+        const auto changes = sender.changes(baseline); auto entries = changes.value("entries").toArray(); QCOMPARE(entries.size(), 2);
+        for (qsizetype i = 0; i < entries.size(); ++i) {
+            auto proposal = entries[i].toObject();
+            for (const auto *key : {"namespace", "authority", "revision"}) proposal.remove(key);
+            proposal.insert("baseRevision", ""); entries[i] = proposal;
+        }
         QByteArray records; for (const auto &entry : entries) records += QJsonDocument(entry.toObject()).toJson(QJsonDocument::Compact) + '\n';
         const auto id = QString::fromLatin1(QCryptographicHash::hash(records, QCryptographicHash::Sha256).toHex());
         QJsonObject page{{"action", "manifest"}, {"container", host.containerId()}, {"replica", sender.replicaId()}, {"manifest", id},

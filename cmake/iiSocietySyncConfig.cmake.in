@@ -1,7 +1,19 @@
 @PACKAGE_INIT@
 include(CMakeFindDependencyMacro)
-find_dependency(Qt6 6.8.3 EXACT COMPONENTS Core Sql Network)
-find_dependency(iiSocietyContainer 0.13.0 CONFIG)
-find_dependency(iiServerHost 0.4.1 CONFIG)
+find_dependency(Qt6 6.8.3 EXACT COMPONENTS Core Gui Sql Network)
+if(@IISOCIETYSYNC_WITH_BLE@)
+    find_dependency(Qt6 6.8.3 EXACT COMPONENTS Bluetooth)
+endif()
+
+if(APPLE AND NOT IOS AND TARGET WrapOpenGL::WrapOpenGL)
+    get_target_property(_society_gl WrapOpenGL::WrapOpenGL INTERFACE_LINK_LIBRARIES)
+    if(_society_gl)
+        list(FILTER _society_gl EXCLUDE REGEX "AGL")
+        set_property(TARGET WrapOpenGL::WrapOpenGL PROPERTY INTERFACE_LINK_LIBRARIES "${_society_gl}")
+    endif()
+endif()
+
+find_dependency(iiSocietyContainer 0.14.0 CONFIG)
+find_dependency(iiServerHost 0.6.0 CONFIG)
 include("${CMAKE_CURRENT_LIST_DIR}/iiSocietySyncTargets.cmake")
 check_required_components(iiSocietySync)

@@ -9,6 +9,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
+#include <QElapsedTimer>
 
 using namespace iiSocietySync;
 static void put(const QString &path, QByteArray data) { QDir().mkpath(QFileInfo(path).absolutePath()); QFile f(path); QVERIFY(f.open(QIODevice::WriteOnly)); QCOMPARE(f.write(data), data.size()); }
@@ -27,6 +28,47 @@ class SyncTests : public QObject {
         QVERIFY2(completed[0][1].toBool(), qPrintable(completed[0][2].toString()));
     }
 private slots:
+    void boundedWindowHandlesReorderedReplies_data() {
+        QTest::addColumn<int>("window"); QTest::addColumn<bool>("upload"); QTest::addColumn<bool>("legacy");
+        QTest::newRow("serial-download") << 1 << false << false;
+        QTest::newRow("window-download") << 4 << false << false;
+        QTest::newRow("window-upload") << 4 << true << false;
+        QTest::newRow("legacy-download") << 4 << false << true;
+    }
+    void boundedWindowHandlesReorderedReplies() {
+        QFETCH(int, window); QFETCH(bool, upload); QFETCH(bool, legacy);
+        QTemporaryDir a(SYNC_TEST_DIRECTORY "/window-a-XXXXXX"), b(SYNC_TEST_DIRECTORY "/window-b-XXXXXX");
+        QVERIFY(iiSocietyContainer::SocietyDrive::create(a.path())); QVERIFY(iiSocietyContainer::SocietyDrive::create(b.path()));
+        Replica client, host; QVERIFY(client.open(a.path(), QString(64, 'a'))); QVERIFY(host.open(b.path(), QString(64, 'a')));
+        cycle(client, host);
+        QByteArray bytes(5 * 1024 * 1024 + 123, Qt::Uninitialized);
+        for (qsizetype i = 0; i < bytes.size(); ++i) bytes[i] = char((i * 31 + i / 256) % 251);
+        put((upload ? a : b).filePath("Models/window.bin"), bytes);
+        Synchronizer sync(&client); QVERIFY(sync.setTransferWindow(window)); QVERIFY(!sync.setTransferWindow(0)); QVERIFY(!sync.setTransferWindow(5));
+        QSignalSpy done(&sync, &Synchronizer::finished); int outstanding = 0, peak = 0; qint64 previous = 0;
+        connect(&sync, &Synchronizer::progress, &sync, [&](const auto &path, qint64 completed, qint64 total) {
+            if (!path.endsWith("window.bin")) return;
+            QVERIFY(completed > previous); previous = completed; QCOMPARE(total, bytes.size());
+        });
+        connect(&sync, &Synchronizer::requestReady, &sync, [&](auto id, auto, auto wire) {
+            const auto message = wire.value("message").toObject(); auto result = host.handle("client", message);
+            if (legacy) result.remove("transferWindow");
+            const bool chunk = message.value("action") == (upload ? "chunk" : "read");
+            const auto position = message.value("offset").toString().toLongLong() / Replica::ChunkBytes;
+            if (chunk) { ++outstanding; peak = qMax(peak, outstanding); }
+            QTimer::singleShot(chunk ? 40 + (3 - position % 4) * 8 : 0, &sync, [&, id, result, chunk] {
+                if (chunk) --outstanding;
+                const QJsonObject response{{"ok", true}, {"result", result}};
+                sync.receive(id, response); sync.receive(id, response); // A duplicate must not advance the cursor twice.
+            });
+        });
+        QElapsedTimer elapsed; elapsed.start(); QVERIFY(sync.start("host")); QVERIFY(!sync.setTransferWindow(1));
+        QTRY_COMPARE_WITH_TIMEOUT(done.size(), 1, 15000);
+        QVERIFY2(done[0][1].toBool(), qPrintable(done[0][2].toString()));
+        QCOMPARE(peak, legacy ? 1 : window); QCOMPARE(outstanding, 0); QCOMPARE(previous, bytes.size());
+        QCOMPARE(get((upload ? b : a).filePath("Models/window.bin")), bytes);
+        qInfo("transfer window=%d legacy=%d upload=%d bytes=%lld elapsed_ms=%lld", window, legacy, upload, qlonglong(bytes.size()), elapsed.elapsed());
+    }
     void smallChangesAndDeletionDoNotWaitForBulkTransfer_data() {
         QTest::addColumn<bool>("upload");
         QTest::newRow("download") << false;

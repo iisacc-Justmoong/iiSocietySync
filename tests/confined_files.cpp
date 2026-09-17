@@ -12,6 +12,27 @@ using iiSocietySync::detail::FileState;
 class ConfinedFilesTests : public QObject {
     Q_OBJECT
 private slots:
+    void hashingReportsRealByteProgressAndCanStopAtAChunkBoundary() {
+        QTemporaryDir dir(SYNC_TEST_DIRECTORY "/hash-progress-XXXXXX");
+        ConfinedFiles files; QVERIFY(files.open(dir.path()));
+        const QByteArray bytes(3 * 1024 * 1024 + 71, 'p');
+        QFile output(dir.filePath("model")); QVERIFY(output.open(QIODevice::WriteOnly));
+        QCOMPARE(output.write(bytes), bytes.size()); output.close();
+        QList<qint64> observed;
+        files.hashProgress = [&](const QString &path, qint64 done, qint64 total) {
+            QCOMPARE(path, QString("model")); QCOMPARE(total, bytes.size());
+            if (!observed.isEmpty()) QVERIFY(done > observed.last());
+            observed.append(done);
+        };
+        QCOMPARE(files.hash("model"), QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex()));
+        QCOMPARE(observed.first(), 0); QCOMPARE(observed.last(), bytes.size());
+        QVERIFY(observed.size() > 2);
+        observed.clear();
+        files.cancelled = [&] { return !observed.isEmpty() && observed.last() > 0; };
+        QVERIFY(files.hash("model").isEmpty());
+        QCOMPARE(files.error, QString("cancelled"));
+        QVERIFY(observed.last() < bytes.size());
+    }
     void sha256MatchesAcrossPaddingAndReadBoundaries() {
         QTemporaryDir dir(SYNC_TEST_DIRECTORY "/files-digest-XXXXXX");
         ConfinedFiles files; QVERIFY(files.open(dir.path()));

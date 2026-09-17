@@ -1,5 +1,6 @@
 #pragma once
 #include "iiSocietySyncExport.h"
+#include "Synchronizer.h"
 #include <QJsonObject>
 #include <QObject>
 #include <QStringList>
@@ -7,6 +8,7 @@
 #include <memory>
 
 namespace iiSocietySync {
+class ObjectProvider;
 using RequestSender = std::function<QString(const QString &peer, const QJsonObject &payload)>;
 // Owns device-to-device synchronization and its worker. The app supplies only
 // an already authenticated transport and its current authorized peer set.
@@ -26,17 +28,26 @@ public:
     // the caller. Desktop ownership handoff must still use closeAndWait().
     void shutdownAsync();
     void setPeers(const QStringList &authorizedPeers, const QStringList &remoteHosts);
+    // Queue an authenticated host selection on the replica worker. A busy local
+    // operation lock is retried; no replication is served until it is durable.
+    void claimPrimaryHost(const QString &device);
     bool available() const;
     bool busy() const;
     QString errorString() const;
     void synchronizeNow();
+    void setContentPolicy(Synchronizer::ContentPolicy policy);
+    void placeObject(const QString &path, std::shared_ptr<ObjectProvider> provider);
+    void restoreObject(const QString &path, std::shared_ptr<ObjectProvider> provider);
     QJsonObject handle(const QString &peer, const QJsonObject &envelope);
     void receive(const QString &transportRequestId, const QJsonObject &response);
 signals:
+    void namespaceChanged(QJsonObject state);
+    void providerFinished(QString path, QString provider, bool restored, bool success, QString error);
     void mirrorChanged(QJsonObject binding);
     void changed();
     void synchronized(QString peer);
     void progress(QString path, qint64 completedBytes, qint64 totalBytes);
+    void verificationProgress(QString path, qint64 completedBytes, qint64 totalBytes);
     void containerInspected(QString path, QString scope, QJsonObject binding,
         QString containerIdentifier, QString primaryHost);
 private:

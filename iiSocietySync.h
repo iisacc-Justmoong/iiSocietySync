@@ -13,3 +13,6 @@ namespace iiSocietySync {
 #include "Synchronizer.h"
 #include "Controller.h"
 #include "RemoteFiles.h"
+#include "NearbyBootstrap.h"
+#include "BleDiscovery.h"
+#include "ObjectProvider.h"

@@ -218,11 +218,15 @@ QString ConfinedFiles::hash(const QString &path, const QString &expected) {
     if (!file || !snapshot(file->get(), &before)) { fail("not_file"); return {}; }
     if (!expected.isEmpty() && expected != before.stamp) { fail("file_changed"); return {}; }
     QCryptographicHash hash(QCryptographicHash::Sha256);
+    qint64 processed = 0;
+    if (hashProgress) hashProgress(path, 0, before.size);
     while (true) {
         if (cancelled && cancelled()) { fail("cancelled"); return {}; }
         QByteArray bytes(1024 * 1024, Qt::Uninitialized);
         if (!readBytes(file->get(), &bytes)) { fail("read_failed"); return {}; }
         if (bytes.isEmpty()) break; hash.addData(bytes);
+        processed += bytes.size();
+        if (hashProgress) hashProgress(path, processed, before.size);
     }
     if (!snapshot(file->get(), &after) || after.stamp != before.stamp) { fail("file_changed"); return {}; }
     return QString::fromLatin1(hash.result().toHex());

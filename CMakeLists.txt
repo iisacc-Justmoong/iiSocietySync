@@ -35,15 +35,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 else()
     set(sync_library_type SHARED)
 endif()
-add_library(iiSocietySync ${sync_library_type} iiSocietySync.cpp iiSocietySync.h iiSocietySyncExport.h
-    Replica.cpp Replica.h ConfinedFiles.cpp ConfinedFiles.h Synchronizer.cpp Synchronizer.h
-    NamespaceJournal.cpp NamespaceJournal.h
-    ObjectProvider.cpp ObjectProvider.h
-    Controller.cpp Controller.h RemoteFiles.cpp RemoteFiles.h
-    NearbyBootstrap.cpp NearbyBootstrap.h BleDiscovery.cpp BleDiscovery.h)
+add_library(iiSocietySync ${sync_library_type} src/iiSocietySync.cpp src/iiSocietySync.h src/iiSocietySyncExport.h
+    src/Replica.cpp src/Replica.h src/ConfinedFiles.cpp src/ConfinedFiles.h src/Synchronizer.cpp src/Synchronizer.h
+    src/NamespaceJournal.cpp src/NamespaceJournal.h
+    src/ObjectProvider.cpp src/ObjectProvider.h
+    src/Controller.cpp src/Controller.h src/RemoteFiles.cpp src/RemoteFiles.h
+    src/NearbyBootstrap.cpp src/NearbyBootstrap.h src/BleDiscovery.cpp src/BleDiscovery.h)
 add_library(iiSocietySync::iiSocietySync ALIAS iiSocietySync)
 if(WIN32)
-    target_sources(iiSocietySync PRIVATE ConfinedFiles_win.cpp)
+    target_sources(iiSocietySync PRIVATE src/ConfinedFiles_win.cpp)
     target_link_libraries(iiSocietySync PRIVATE ntdll)
 endif()
 target_compile_features(iiSocietySync PUBLIC cxx_std_23)
@@ -54,7 +54,7 @@ endif()
 target_compile_definitions(iiSocietySync PRIVATE IISOCIETYSYNC_BUILDING_LIBRARY)
 target_link_libraries(iiSocietySync PUBLIC Qt6::Core Qt6::Gui Qt6::Sql Qt6::Network iiSocietyContainer::iiSocietyContainer iiServerHost::iiServerHost)
 target_include_directories(iiSocietySync PUBLIC
-    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>"
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
 set_target_properties(iiSocietySync PROPERTIES
     VERSION ${PROJECT_VERSION}
@@ -92,13 +92,13 @@ if(BUILD_TESTING)
         add_test(NAME iiSocietySync.SocketTransfer COMMAND iiSocietySync_socket_tests)
         set_tests_properties(iiSocietySync.SocketTransfer PROPERTIES TIMEOUT 90)
     endif()
-    add_executable(iiSocietySync_files_tests tests/confined_files.cpp ConfinedFiles.cpp)
+    add_executable(iiSocietySync_files_tests tests/confined_files.cpp src/ConfinedFiles.cpp)
     if(WIN32)
-        target_sources(iiSocietySync_files_tests PRIVATE ConfinedFiles_win.cpp)
+        target_sources(iiSocietySync_files_tests PRIVATE src/ConfinedFiles_win.cpp)
         target_link_libraries(iiSocietySync_files_tests PRIVATE ntdll)
     endif()
     target_compile_features(iiSocietySync_files_tests PRIVATE cxx_std_20)
-    target_include_directories(iiSocietySync_files_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_include_directories(iiSocietySync_files_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_link_libraries(iiSocietySync_files_tests PRIVATE Qt6::Core Qt6::Test)
     target_compile_definitions(iiSocietySync_files_tests PRIVATE SYNC_TEST_DIRECTORY="${IISOCIETYSYNC_TEST_DIRECTORY}")
     add_test(NAME iiSocietySync.ConfinedFiles COMMAND iiSocietySync_files_tests)
@@ -128,8 +128,8 @@ install(TARGETS iiSocietySync EXPORT iiSocietySyncTargets
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
-install(FILES iiSocietySync.h iiSocietySyncExport.h Replica.h Synchronizer.h Controller.h RemoteFiles.h
-    NearbyBootstrap.h BleDiscovery.h ObjectProvider.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(FILES src/iiSocietySync.h src/iiSocietySyncExport.h src/Replica.h src/Synchronizer.h src/Controller.h src/RemoteFiles.h
+    src/NearbyBootstrap.h src/BleDiscovery.h src/ObjectProvider.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(FILES README.md NearbySync.md Namespace.md DESTINATION ${CMAKE_INSTALL_DATADIR}/iiSocietySync)
 set(iiSocietySync_PACKAGE_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/iiSocietySync")
 configure_package_config_file(cmake/iiSocietySyncConfig.cmake.in

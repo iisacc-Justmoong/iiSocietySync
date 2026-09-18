@@ -166,3 +166,7 @@ Photos는 Container 0.13.0의 최상위 섹션이다. `allStoreSections()`에서
 ## 무결성 검사 진행 보고
 
 `Replica::setVerificationProgress`와 `Controller::verificationProgress`는 SHA-256 처리의 실제 바이트를 전달한다. 파일별 0부터 시작하며 진행 이벤트는 처리 바이트를 의미한다. 해시 성공이나 전송 완료를 대신하지 않는다. Controller는 자기 스레드에서 최대 약 10 Hz와 시작·마지막 청크를 전달하고 이전 컨테이너의 이벤트를 폐기한다. 전송 진행 신호와 분리하여 모바일 OS의 지속 실행 작업이 큰 모델 검사 중에도 진행을 관측할 수 있게 한다. OS 실행 권한은 소비자 앱의 책임이다. ConfinedFiles 테스트는 정확한 해시·청크별 진행·중간 취소를 함께 검사한다.
+
+## Source layout
+
+Implementation files and their headers live together under `src/`. Existing feature and platform subdirectories retain their responsibilities. Build configuration, tests, documentation, resources, and maintenance scripts remain at the project root. Configure and build using the repository-local `build/` directory.

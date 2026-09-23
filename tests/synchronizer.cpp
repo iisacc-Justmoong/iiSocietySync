@@ -28,6 +28,25 @@ class SyncTests : public QObject {
         QVERIFY2(completed[0][1].toBool(), qPrintable(completed[0][2].toString()));
     }
 private slots:
+    void accountHostReplacementPreservesOldEditsAndRejectsWrongContainer() {
+        QTemporaryDir a(SYNC_TEST_DIRECTORY "/account-a-XXXXXX"), b(SYNC_TEST_DIRECTORY "/account-b-XXXXXX"), c(SYNC_TEST_DIRECTORY "/account-c-XXXXXX");
+        QVERIFY(iiSocietyContainer::SocietyDrive::create(a.path())); QVERIFY(iiSocietyContainer::SocietyDrive::create(b.path())); QVERIFY(iiSocietyContainer::SocietyDrive::create(c.path()));
+        Replica client, oldHost, newHost;
+        QVERIFY(client.open(a.path(), QString(64, 'a'))); QVERIFY(oldHost.open(b.path(), QString(64, 'a'))); QVERIFY(newHost.open(c.path(), QString(64, 'a')));
+        cycle(client, oldHost); put(a.filePath("Files/offline"), "old-host-only"); put(c.filePath("Files/new"), "new-host-data");
+        Synchronizer sync(&client); QSignalSpy finished(&sync, &Synchronizer::finished);
+        connect(&sync, &Synchronizer::requestReady, &sync, [&](auto id, auto, auto wire) {
+            sync.receive(id, {{"ok", true}, {"result", newHost.handle("phone", wire.value("message").toObject())}});
+        });
+        sync.setExpectedHost("new-mac", oldHost.containerId()); QVERIFY(sync.start("new-mac"));
+        QTRY_COMPARE(finished.size(), 1); QCOMPARE(finished[0][2].toString(), QString("account_host_mismatch"));
+        QCOMPARE(client.containerId(), oldHost.containerId()); QCOMPARE(get(a.filePath("Files/offline")), QByteArray("old-host-only"));
+        finished.clear(); sync.setExpectedHost("new-mac", newHost.containerId()); QVERIFY(sync.start("new-mac"));
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 20000); QVERIFY2(finished[0][1].toBool(), qPrintable(finished[0][2].toString()));
+        QCOMPARE(client.binding().value("host").toString(), QString("new-mac")); QCOMPARE(client.containerId(), newHost.containerId());
+        QCOMPARE(get(a.filePath("Files/new")), QByteArray("new-host-data")); QVERIFY(!QFileInfo::exists(c.filePath("Files/offline")));
+        QCOMPARE(get(a.filePath(client.binding().value("recovery").toString() + "/Files/offline")), QByteArray("old-host-only"));
+    }
     void boundedWindowHandlesReorderedReplies_data() {
         QTest::addColumn<int>("window"); QTest::addColumn<bool>("upload"); QTest::addColumn<bool>("legacy");
         QTest::newRow("serial-download") << 1 << false << false;
@@ -231,7 +250,7 @@ private slots:
         cycle(client, host); QCOMPARE(client.containerId(), host.containerId());
         QCOMPARE(get(a.filePath(recovery + "/Files/one")), QByteArray("one"));
         QCOMPARE(get(a.filePath(recovery + "/Models/two")), QByteArray("two"));
-        QCOMPARE(QDir(a.filePath("Files")).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size(), 3);
+        QCOMPARE(QDir(a.filePath("Files")).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size(), 0);
         const QDir clientModels(a.filePath("Models")), hostModels(b.filePath("Models"));
         const auto modelFolders = hostModels.entryList(QDir::AllEntries | QDir::NoDotAndDotDot, QDir::Name);
         QCOMPARE(clientModels.entryList(QDir::AllEntries | QDir::NoDotAndDotDot, QDir::Name), modelFolders);
@@ -271,7 +290,7 @@ private slots:
         QVERIFY(iiSocietyContainer::SocietyDrive::create(a.path())); QVERIFY(iiSocietyContainer::SocietyDrive::create(b.path())); QVERIFY(iiSocietyContainer::SocietyDrive::create(c.path()));
         put(a.filePath("Files/independent"), "legacy");
         Replica client, host, replacement; QVERIFY(client.open(a.path(), QString(64, 'a'))); QVERIFY(host.open(b.path(), QString(64, 'a')));
-        cycle(client, host); QCOMPARE(QDir(a.filePath("Files")).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size(), 3);
+        cycle(client, host); QCOMPARE(QDir(a.filePath("Files")).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size(), 0);
         put(a.filePath("Files/pending"), "offline edit for old drive"); put(c.filePath("Files/new-host"), "new drive");
         QVERIFY(replacement.open(c.path(), QString(64, 'a'))); cycle(client, replacement);
         QCOMPARE(client.containerId(), replacement.containerId());

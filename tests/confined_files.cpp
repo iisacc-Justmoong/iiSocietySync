@@ -5,6 +5,9 @@
 #include <QJsonObject>
 #include <QTemporaryDir>
 #include <QTest>
+#include <DiskImage.h>
+#include <SocietyDrive.h>
+#include <QScopeGuard>
 
 using iiSocietySync::detail::ConfinedFiles;
 using iiSocietySync::detail::FileState;
@@ -12,6 +15,38 @@ using iiSocietySync::detail::FileState;
 class ConfinedFilesTests : public QObject {
     Q_OBJECT
 private slots:
+    void nativePublicFilesRemainConfinedAndSupportPrivateRecovery() {
+#ifndef Q_OS_MACOS
+        QSKIP("Native Files volumes require macOS.");
+#else
+        QTemporaryDir dir(SYNC_TEST_DIRECTORY "/native-files-XXXXXX"); QVERIFY(dir.isValid());
+        const auto disk = iiSocietyContainer::DiskImage::create(dir.path().toStdString(), 512ULL * 1024 * 1024);
+        QVERIFY2(disk, disk ? "" : disk.error().c_str());
+        const auto eject = qScopeGuard([&] { iiSocietyContainer::DiskImage::detach(disk->imagePath); });
+        const auto root = QString::fromStdString(disk->mountPath.string());
+        const auto drive = iiSocietyContainer::SocietyDrive::create(root); QVERIFY(drive);
+        const auto publicRoot = drive->sectionPath(iiSocietyContainer::StoreSection::Files);
+        ConfinedFiles files; QVERIFY2(files.open(root), qPrintable(files.error));
+        QVERIFY(files.mkdir("Files/Documents/Nested"));
+        QVERIFY(!QFileInfo::exists(root + "/Files"));
+        QVERIFY(files.append("Files/Documents/Nested/example.txt", 0, "original"));
+        QVERIFY(QFileInfo::exists(publicRoot + "/Documents/Nested/example.txt"));
+        QVERIFY(files.mkdir(".society-sync/transfers"));
+        QVERIFY(files.append(".society-sync/transfers/incoming", 0, "updated"));
+        QVERIFY2(files.install(".society-sync/transfers/incoming", "Files/Documents/Nested/example.txt"), qPrintable(files.error));
+        QCOMPARE(files.read("Files/Documents/Nested/example.txt", 0, 100), QByteArray("updated"));
+        QCOMPARE(QDir(root + "/.society-sync/recovery").entryList({"*.json"}, QDir::Files).size(), 1);
+        QVERIFY(files.remove("Files/Documents/Nested/example.txt"));
+        QVERIFY(!QFileInfo::exists(publicRoot + "/Documents/Nested/example.txt"));
+        QVERIFY(files.append("Files/Documents/Nested/keep.txt", 0, "adoption recovery"));
+        QVERIFY2(files.detach("Files/Documents/Nested", ".society-sync/detached/test/Files/Documents/Nested"), qPrintable(files.error));
+        QCOMPARE(files.read(".society-sync/detached/test/Files/Documents/Nested/keep.txt", 0, 100), QByteArray("adoption recovery"));
+        QVERIFY(!QFileInfo::exists(publicRoot + "/Documents/Nested"));
+        QVERIFY(!files.read("Files/../Models/private", 0, 10).size());
+        QVERIFY(iiSocietyContainer::DiskImage::detach(disk->imagePath));
+        QVERIFY(!files.intact());
+#endif
+    }
     void hashingReportsRealByteProgressAndCanStopAtAChunkBoundary() {
         QTemporaryDir dir(SYNC_TEST_DIRECTORY "/hash-progress-XXXXXX");
         ConfinedFiles files; QVERIFY(files.open(dir.path()));

@@ -44,7 +44,7 @@ public:
         int pollDelay = 1;
         qint64 deadline = 0;
     };
-    QString peer, remoteId, remoteContainer;
+    QString peer, remoteId, remoteContainer, expectedHost, expectedContainer;
     QHash<QString, std::shared_ptr<Request>> requests;
     int configuredWindow = 4, window = 1, pendingChunks = 0;
     QMap<qint64, QJsonObject> receivedChunks;
@@ -122,7 +122,12 @@ public:
                 || authority.value("namespace") != r.value("container") || authority.value("authority") != r.value("replica")) {
                 finish(false, "namespace_authority_protocol_required"); return;
             }
-            if (r.value("protocol") != 2 || !store->bindHost(peer, r.value("replica").toString(), r.value("container").toString())) {
+            if ((!expectedHost.isEmpty() || !expectedContainer.isEmpty())
+                && (peer != expectedHost || r.value("container").toString() != expectedContainer)) {
+                finish(false, "account_host_mismatch"); return;
+            }
+            if (r.value("protocol") != 2 || !store->bindHost(peer, r.value("replica").toString(), r.value("container").toString(),
+                !expectedHost.isEmpty() && !expectedContainer.isEmpty())) {
                 finish(false, r.value("protocol") != 2 ? "host_mirror_protocol_required" : store->errorString()); return;
             }
             emit q->mirrorChanged(store->binding());
@@ -449,6 +454,9 @@ bool Synchronizer::start(const QString &peer) {
     d->transferSlice.invalidate(); d->transferredInSlice = false;
     d->previewsDone = false; d->previews = {}; d->previewIndex = 0;
     d->pulled = 0; d->pushed = 0; d->timeout.start(); d->describe(); return true;
+}
+void Synchronizer::setExpectedHost(QString host, QString container) {
+    stop(); d->expectedHost = std::move(host); d->expectedContainer = std::move(container);
 }
 void Synchronizer::stop() { if (d->active) d->finish(false, "cancelled"); }
 void Synchronizer::receive(const QString &requestId, const QJsonObject &response) {

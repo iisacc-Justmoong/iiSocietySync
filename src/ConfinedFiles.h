@@ -28,6 +28,7 @@ public:
     bool exactPath(const QString &path);
 private:
     quint64 m_device = 0, m_inode = 0;
+    std::unique_ptr<ConfinedFiles> m_publicFiles;
 #ifdef Q_OS_WIN
     QByteArray m_fileId;
     quint32 m_nativeError = 0;

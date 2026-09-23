@@ -1,5 +1,4 @@
 #include "Replica.h"
-#include <FileDirectory.h>
 #include "ConfinedFiles.h"
 #include "NamespaceJournal.h"
 #include "ObjectProvider.h"
@@ -257,19 +256,10 @@ public:
         const bool same = !absentPayload && contentEqual(incoming, local);
         // A nonempty local directory must never be replaced by a file/deletion.
         bool retainDirectory = false;
-        const bool fixedDirectory = path.startsWith("files/") && iiSocietyContainer::isFixedFilesDirectory(path.mid(6));
         if (local.value("kind") == "directory" && incoming.value("kind") != "directory") {
             bool ok; const auto children = files.list(physical(path), &ok);
             if (!ok) return failed(files.error);
-            retainDirectory = !children.isEmpty() || fixedDirectory;
-        }
-        if (retainDirectory && fixedDirectory && !mirror) {
-            // Publish the invariant as a newer directory revision, so replayed
-            // legacy tombstones are acknowledged and cannot stall synchronization.
-            const auto counter = qMax(meta("counter").toLongLong(), clock.value(id).toString().toLongLong()) + 1;
-            if (counter > MaxCounter || (clock.size() == 64 && !clock.contains(id))
-                || !setMeta("counter", QString::number(counter))) return failed("replica_clock_limit");
-            clock.insert(id, QString::number(counter));
+            retainDirectory = !children.isEmpty();
         }
         if (mirror && retainDirectory && !same) {
             // Unsynchronized children cannot be destroyed to materialize a
@@ -475,12 +465,12 @@ bool Replica::completeBootstrap() {
     if (!d->setMeta("bootstrapComplete", "1")) return false;
     return d->writeBinding();
 }
-bool Replica::bindHost(const QString &peer, const QString &replica, const QString &container) {
+bool Replica::bindHost(const QString &peer, const QString &replica, const QString &container, bool replaceHost) {
     auto lock = d->lock(); if (!lock) return false;
     if (!primaryHost(d->files.root, d->scope).isEmpty()) return d->fail("authority_cannot_become_mirror");
     if (peer.isEmpty() || peer.size() > 256 || QUuid(replica).isNull() || replica == replicaId()
         || QUuid(container).isNull() || QUuid(container).toString(QUuid::WithoutBraces) != container) return d->fail("invalid_host_identity");
-    if (!d->meta("host").isEmpty() && d->meta("host") != peer) return d->fail("different_primary_host");
+    if (!replaceHost && !d->meta("host").isEmpty() && d->meta("host") != peer) return d->fail("different_primary_host");
     if (!d->resumeAdoption()) return false;
     if (d->meta("host") == peer && d->meta("target") == container) {
         if (d->meta("hostReplica") != replica) {
@@ -503,14 +493,6 @@ bool Replica::bindHost(const QString &peer, const QString &replica, const QStrin
         const auto names = d->files.list(native, &listed); if (!listed) { ok = false; break; }
         for (const auto &name : names) {
             QStringList paths{native + '/' + name};
-            if (section == iiSocietyContainer::StoreSection::Files && iiSocietyContainer::isFixedFilesDirectory(name)) {
-                // Archive former contents but keep each fixed directory in place
-                // throughout host adoption, including an interrupted first mirror.
-                paths.clear();
-                const auto children = d->files.list(native + '/' + name, &listed);
-                if (!listed) { ok = false; break; }
-                for (const auto &child : children) paths.append(native + '/' + name + '/' + child);
-            }
             for (const auto &path : paths) {
                 if (++count > 250000) { ok = false; break; }
                 QSqlQuery q(d->db); q.prepare("INSERT INTO detach(path,target) VALUES(?,?)");
@@ -734,7 +716,7 @@ bool Replica::placeObject(const QString &path, ObjectProvider &provider) {
     // A receipt belongs only to the verified version, even if the file changes
     // during I/O. Remote storage never holds the authority's database lock.
     lock.reset();
-    if (!provider.put(object, QDir(d->files.root).filePath(physical(path)), &d->error, d->files.cancelled)) return false;
+    if (!provider.put(object, d->drive->resolvePath(physical(path)), &d->error, d->files.cancelled)) return false;
     lock = d->lock(2000); if (!lock) return false;
     auto ledger = d->journal();
     return ledger.locate(e.value("version").toString(), {{"provider", provider.id()}, {"kind", provider.kind()}, {"key", object.key()}})

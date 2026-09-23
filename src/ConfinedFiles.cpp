@@ -1,7 +1,9 @@
 #include "ConfinedFiles.h"
+#include <DiskImage.h>
 #include <QCryptographicHash>
 #ifdef Q_OS_DARWIN
 #include <CommonCrypto/CommonDigest.h>
+#include <copyfile.h>
 #endif
 #include <QDir>
 #include <QFile>
@@ -45,13 +47,25 @@ bool ConfinedFiles::open(const QString &path) {
     const QFileInfo info(path); struct stat s{};
     if (!QDir::isAbsolutePath(path) || !info.isDir() || info.isSymLink() || info.canonicalFilePath() != QDir::cleanPath(path)
         || ::lstat(QFile::encodeName(path).constData(), &s) != 0 || !S_ISDIR(s.st_mode)) return fail("container_unavailable");
-    root = info.canonicalFilePath(); m_device = s.st_dev; m_inode = s.st_ino; return true;
+    root = info.canonicalFilePath(); m_device = s.st_dev; m_inode = s.st_ino;
+    m_publicFiles.reset();
+    if (const auto files = iiSocietyContainer::DiskImage::filesRoot(root.toStdString())) {
+        m_publicFiles = std::make_unique<ConfinedFiles>();
+        if (!m_publicFiles->open(QString::fromStdString(files->string()))) return fail("files_volume_unavailable");
+    }
+    if (!m_publicFiles && QFileInfo::exists(root + "/.society-disk.plist")) return fail("files_volume_unavailable");
+    return true;
 #else
     Q_UNUSED(path); return fail("native_sync_filesystem_unsupported_platform");
 #endif
 }
 bool ConfinedFiles::intact() {
     if (cancelled && cancelled()) return fail("cancelled");
+    if (m_publicFiles) {
+        const auto files = iiSocietyContainer::DiskImage::filesRoot(root.toStdString());
+        if (!files || QString::fromStdString(files->string()) != m_publicFiles->root || !m_publicFiles->intact())
+            return fail("files_volume_replaced_or_unavailable");
+    }
 #ifdef Q_OS_UNIX
     struct stat s{};
     if (!root.isEmpty() && ::lstat(QFile::encodeName(root).constData(), &s) == 0 && S_ISDIR(s.st_mode)
@@ -61,7 +75,12 @@ bool ConfinedFiles::intact() {
 }
 int ConfinedFiles::openAt(const QString &path, int flags, bool parents) {
 #ifdef Q_OS_UNIX
-    if (!intact() || (!path.isEmpty() && !relative(path))) { fail("invalid_path"); return -1; }
+    if (!intact() || (!path.isEmpty() && !relative(path))) { errno = EINVAL; fail("invalid_path"); return -1; }
+    if (m_publicFiles && (path == "Files" || path.startsWith("Files/"))) {
+        const auto fd = m_publicFiles->openAt(path == "Files" ? QString() : path.mid(6), flags, parents);
+        if (fd < 0) error = m_publicFiles->error;
+        return fd;
+    }
     int fd = ::open(QFile::encodeName(root).constData(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) { fail("container_unavailable"); return -1; }
     struct stat s{};
@@ -83,7 +102,7 @@ int ConfinedFiles::openAt(const QString &path, int flags, bool parents) {
 }
 int ConfinedFiles::parent(const QString &path, bool create) {
 #ifdef Q_OS_UNIX
-    if (!relative(path)) { fail("invalid_path"); return -1; }
+    if (!relative(path)) { errno = EINVAL; fail("invalid_path"); return -1; }
     const auto name = path.contains('/') ? path.left(path.lastIndexOf('/')) : QString();
     if (create && !name.isEmpty() && !mkdir(name)) return -1;
     return openAt(name, O_RDONLY | O_DIRECTORY);
@@ -94,6 +113,12 @@ int ConfinedFiles::parent(const QString &path, bool create) {
 bool ConfinedFiles::state(const QString &path, FileState *value) {
     *value = {};
 #ifdef Q_OS_UNIX
+    if (path == "Files" && m_publicFiles) {
+        if (!intact()) return false;
+        struct stat s{};
+        if (::lstat(QFile::encodeName(m_publicFiles->root).constData(), &s)) return fail("files_volume_unavailable");
+        value->kind = "directory"; value->stamp = stamp(s); return true;
+    }
     Fd directory(parent(path, false));
     if (directory.fd < 0) {
         if (errno == ENOENT && intact()) { error.clear(); value->kind = "deleted"; return true; }
@@ -119,12 +144,16 @@ QStringList ConfinedFiles::list(const QString &path, bool *ok) {
     errno = 0;
     while (const auto *entry = ::readdir(dir)) {
         const QByteArray name(entry->d_name); if (name == "." || name == "..") continue;
+        if (path == "Files" && m_publicFiles && (name == ".Spotlight-V100" || name == ".fseventsd"
+            || name == ".Trashes" || name == ".TemporaryItems" || name == ".DocumentRevisions-V100"
+            || name == ".DS_Store")) continue;
         const auto text = QFile::decodeName(name);
         if (!relative(text) || QFile::encodeName(text) != name) { ::closedir(dir); fail("unsupported_filename"); return {}; }
         names.append(text);
     }
     const bool readOk = errno == 0; ::closedir(dir);
     if (!readOk) { fail("directory_read_failed"); return {}; }
+    if (path.isEmpty() && m_publicFiles && !names.contains("Files")) names.append("Files");
     names.sort(); *ok = true;
 #else
     Q_UNUSED(path);
@@ -194,6 +223,10 @@ bool ConfinedFiles::mkdir(const QString &path) {
     if (!relative(path)) return fail("invalid_path");
     QString prefix;
     for (const auto &part : path.split('/')) {
+        if (prefix.isEmpty() && part == "Files" && m_publicFiles) {
+            if (!intact()) return false;
+            prefix = "Files"; continue;
+        }
         Fd dir(openAt(prefix, O_RDONLY | O_DIRECTORY)); if (dir.fd < 0) return false;
         if (::mkdirat(dir.fd, QFile::encodeName(part).constData(), 0700) && errno != EEXIST) return fail("mkdir_failed");
         prefix += (prefix.isEmpty() ? "" : "/") + part;
@@ -231,7 +264,21 @@ bool ConfinedFiles::preserve(const QString &path, const QString &copy) {
     if (source.fd < 0 || dest.fd < 0) return false;
     struct stat s{}; const auto name = QFile::encodeName(path.section('/', -1));
     if (::fstatat(source.fd, name.constData(), &s, AT_SYMLINK_NOFOLLOW) || !S_ISREG(s.st_mode)) return fail("not_file");
-    if (::linkat(source.fd, name.constData(), dest.fd, QFile::encodeName(copy.section('/', -1)).constData(), 0)) return fail("preserve_failed");
+    if (::linkat(source.fd, name.constData(), dest.fd, QFile::encodeName(copy.section('/', -1)).constData(), 0)) {
+#ifdef Q_OS_MACOS
+        if (errno != EXDEV) return fail("preserve_failed");
+        Fd input(openAt(path, O_RDONLY));
+        Fd output(openAt(copy, O_WRONLY | O_CREAT | O_EXCL));
+        struct stat after{};
+        if (input.fd < 0 || output.fd < 0 || ::fcopyfile(input.fd, output.fd, nullptr, COPYFILE_ALL)
+            || ::fstat(input.fd, &after) || stamp(after) != stamp(s) || ::fsync(output.fd)) {
+            if (output.fd >= 0) ::unlinkat(dest.fd, QFile::encodeName(copy.section('/', -1)).constData(), 0);
+            return fail("preserve_failed");
+        }
+#else
+        return fail("preserve_failed");
+#endif
+    }
     return ::fsync(dest.fd) == 0 || fail("flush_failed");
 #else
     Q_UNUSED(path); Q_UNUSED(copy); return false;
@@ -247,7 +294,17 @@ bool ConfinedFiles::install(const QString &source, const QString &target) {
         if (!archive(target)) return false;
     } else if (errno != ENOENT) return fail("target_unavailable");
     if (!intact()) return false;
-    if (::renameat(from.fd, QFile::encodeName(source.section('/', -1)).constData(), to.fd, name.constData())) return fail("replace_failed");
+    if (::renameat(from.fd, QFile::encodeName(source.section('/', -1)).constData(), to.fd, name.constData())) {
+#ifdef Q_OS_MACOS
+        if (errno != EXDEV) return fail("replace_failed");
+        const auto temporary = target.left(target.lastIndexOf('/') + 1) + ".society-install-" + QUuid::createUuid().toString(QUuid::WithoutBraces);
+        if (!preserve(source, temporary)) return false;
+        if (::renameat(to.fd, QFile::encodeName(temporary.section('/', -1)).constData(), to.fd, name.constData())
+            || ::unlinkat(from.fd, QFile::encodeName(source.section('/', -1)).constData(), 0)) return fail("replace_failed");
+#else
+        return fail("replace_failed");
+#endif
+    }
     return ::fsync(to.fd) == 0 || fail("flush_failed");
 #else
     Q_UNUSED(source); Q_UNUSED(target); return false;
@@ -266,6 +323,25 @@ bool ConfinedFiles::detach(const QString &path, const QString &destination) {
     const bool saved = ::fstatat(to.fd, target.constData(), &b, AT_SYMLINK_NOFOLLOW) == 0;
     if (!saved && errno != ENOENT) return fail("recovery_destination_unavailable");
     if (!exists) return saved || fail("recovery_entry_missing");
+#ifdef Q_OS_MACOS
+    if (m_publicFiles && (path.startsWith("Files/") || path == "Files")) {
+        if (S_ISDIR(a.st_mode)) {
+            if (saved && !S_ISDIR(b.st_mode)) return fail("recovery_destination_occupied");
+            if (!saved && !mkdir(destination)) return false;
+            bool ok; const auto names = list(path, &ok); if (!ok) return false;
+            for (const auto &child : names) if (!detach(path + '/' + child, destination + '/' + child)) return false;
+            if (::unlinkat(from.fd, source.constData(), AT_REMOVEDIR)) return fail("recovery_move_failed");
+        } else if (S_ISREG(a.st_mode)) {
+            if (saved) {
+                const auto original = hash(path, stamp(a));
+                if (!S_ISREG(b.st_mode) || original.isEmpty() || original != hash(destination, stamp(b)))
+                    return fail("recovery_destination_occupied");
+            } else if (!preserve(path, destination)) return false;
+            if (::unlinkat(from.fd, source.constData(), 0)) return fail("recovery_move_failed");
+        } else return fail("unsupported_native_recovery_entry");
+        return (::fsync(from.fd) == 0 && ::fsync(to.fd) == 0) || fail("flush_failed");
+    }
+#endif
     if (saved) return fail("recovery_destination_occupied");
     if (!intact() || ::renameat(from.fd, source.constData(), to.fd, target.constData())) return fail("recovery_move_failed");
     return (::fsync(from.fd) == 0 && ::fsync(to.fd) == 0) || fail("flush_failed");

@@ -27,7 +27,7 @@ public:
     // Permanently cancel this controller and retire its worker without blocking
     // the caller. Desktop ownership handoff must still use closeAndWait().
     void shutdownAsync();
-    void setPeers(const QStringList &authorizedPeers, const QStringList &remoteHosts);
+    void setPeers(const QStringList &authorizedPeers, const QStringList &remoteHosts, const QString &accountHost = {}, const QString &accountContainer = {});
     // Queue an authenticated host selection on the replica worker. A busy local
     // operation lock is retried; no replication is served until it is durable.
     void claimPrimaryHost(const QString &device);

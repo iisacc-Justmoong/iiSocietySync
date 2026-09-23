@@ -1,5 +1,6 @@
 #include "Controller.h"
 #include <QElapsedTimer>
+#include <QDebug>
 #include "Synchronizer.h"
 #include "ObjectProvider.h"
 #include <SharedStorage.h>
@@ -147,6 +148,7 @@ public:
         if (cancellation->load() != revision) return;
         if (!store) initialize();
         stopIndexing();
+        sync->setExpectedHost({}, {}); expectedHost.clear(); expectedContainer.clear();
         sync->stop(); generation = revision; queue.clear(); hosts.clear(); store->close();
         pending = false; changedFiles->stop(); container.clear(); primaryClaim.clear();
         indexDirty = true; indexRefresh.invalidate();
@@ -170,10 +172,13 @@ public:
         if (inspection->load() == revision)
             emit inspected(revision, path, scope, binding, drive ? drive->identifier() : QString(), primary);
     }
-    void setHosts(QStringList values, quint64 revision) {
+    QString expectedHost, expectedContainer;
+    void setHosts(QStringList values, quint64 revision, QString accountHost, QString accountContainer) {
         if (generation != revision || !store) return;
         values.removeDuplicates(); values.sort();
-        if (hosts == values) return;
+        if (hosts == values && expectedHost == accountHost && expectedContainer == accountContainer) return;
+        expectedHost = accountHost; expectedContainer = accountContainer;
+        sync->setExpectedHost(accountHost, accountContainer);
         sync->stop(); hosts = values; queue.clear(); tick();
     }
     void tick() {
@@ -294,6 +299,8 @@ public:
         QObject::connect(worker, &SyncWorker::status, q, [this](quint64 generation, bool available, bool active, const QString &message) {
             if (generation != cancellation->load()) return;
             if (!opening && ready == available && busy == active && error == message) return;
+            if (!message.isEmpty() && qEnvironmentVariableIntValue("SOCIETY_SYNC_TRACE") == 1)
+                qWarning().noquote() << "Society sync error:" << message;
             ready = available; busy = active; opening = false; error = message; emit q->changed();
         });
         QObject::connect(worker, &SyncWorker::request, q, [this](quint64 generation, const QString &id, const QString &peer, const QJsonObject &payload) {
@@ -368,12 +375,12 @@ void Controller::shutdownAsync() {
     QObject::connect(d->thread, &QThread::finished, d->thread, &QObject::deleteLater);
     d->stopWorker();
 }
-void Controller::setPeers(const QStringList &authorizedPeers, const QStringList &remoteHosts) {
+void Controller::setPeers(const QStringList &authorizedPeers, const QStringList &remoteHosts, const QString &accountHost, const QString &accountContainer) {
     if (d->shutdown) return;
     d->authorized = QSet<QString>(authorizedPeers.begin(), authorizedPeers.end());
     QStringList hosts; for (const auto &host : remoteHosts) if (d->authorized.contains(host)) hosts.append(host);
     const auto revision = d->cancellation->load();
-    QMetaObject::invokeMethod(d->worker, [w = d->worker, hosts, revision] { w->setHosts(hosts, revision); });
+    QMetaObject::invokeMethod(d->worker, [w = d->worker, hosts, revision, accountHost, accountContainer] { w->setHosts(hosts, revision, accountHost, accountContainer); });
 }
 void Controller::synchronizeNow() {
     if (d->shutdown) return;

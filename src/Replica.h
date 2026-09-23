@@ -29,7 +29,7 @@ public:
     // Called only after the app's authenticated host descriptor handshake.
     // First adoption archives the former independent contents, then changes
     // the logical UUID. Uploads remain disabled until completeBootstrap().
-    bool bindHost(const QString &peer, const QString &replica, const QString &container);
+    bool bindHost(const QString &peer, const QString &replica, const QString &container, bool replaceHost = false);
     bool bootstrapping() const;
     bool completeBootstrap();
     QJsonObject binding() const;

@@ -12,6 +12,7 @@ public:
     ~Synchronizer() override;
     bool start(const QString &peer);
     void stop();
+    void setExpectedHost(QString host, QString container);
     bool busy() const;
     // FullReplica remains available for explicit backup/replica consumers.
     // Society interactive clients use MetadataFirst.

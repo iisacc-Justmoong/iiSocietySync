@@ -20,8 +20,11 @@ private slots:
         QVERIFY(iiSocietyContainer::SocietyDrive::create(root.path())); const QString scope(64, 'a');
         Controller sync({}); sync.open(root.path(), scope); QTRY_VERIFY(sync.available());
         QLockFile lock(root.filePath(".society-sync/operation.lock")); lock.setStaleLockTime(0); QVERIFY(lock.tryLock(3000));
+        qputenv("SOCIETY_SYNC_TRACE", "1");
+        QTest::ignoreMessage(QtWarningMsg, "Society sync error: primary_host_unavailable");
         QElapsedTimer elapsed; elapsed.start(); sync.claimPrimaryHost("desktop"); QVERIFY(elapsed.elapsed() < 100);
         QTRY_COMPARE(sync.errorString(), QString("primary_host_unavailable"));
+        qunsetenv("SOCIETY_SYNC_TRACE");
         QVERIFY(Replica::primaryHost(root.path(), scope).isEmpty());
         lock.unlock(); QTRY_COMPARE(Replica::primaryHost(root.path(), scope), QString("desktop"));
         QTRY_VERIFY(sync.errorString().isEmpty()); sync.closeAndWait();
@@ -134,12 +137,7 @@ private slots:
         QFile model(root.filePath("Models/private")); QVERIFY(model.open(QIODevice::WriteOnly)); model.write("model"); model.close();
         const auto files = filesHandler(root.path());
         const auto defaults = files("peer", {{"op", "list"}, {"path", ""}}).value("entries").toArray();
-        QSet<QString> names;
-        for (const auto &entry : defaults) {
-            names.insert(entry.toObject().value("name").toString());
-            QVERIFY(entry.toObject().value("directory").toBool());
-        }
-        QCOMPARE(names, (QSet<QString>{"Documents", "Audios", "3D objects"}));
+        QVERIFY(defaults.isEmpty());
         QVERIFY(!files("peer", {{"op", "list"}, {"path", "../Models"}}).value("ok").toBool());
         QVERIFY(!files("peer", {{"op", "stat"}, {"path", QJsonArray{}}}).value("ok").toBool());
         QVERIFY(!files("peer", {{"op", "list"}, {"cursor", "-1"}}).value("ok").toBool());
@@ -162,7 +160,7 @@ private slots:
         auto page = files("peer", {{"op", "list"}, {"path", ""}}); QVERIFY(page.value("ok").toBool());
         QCOMPARE(page.value("entries").toArray().size(), 256); QVERIFY(!page.value("nextCursor").toString().isEmpty());
         auto next = files("peer", {{"op", "list"}, {"path", ""}, {"cursor", page.value("nextCursor")}});
-        QCOMPARE(next.value("entries").toArray().size(), 8); QVERIFY(next.value("nextCursor").toString().isEmpty());
+        QCOMPARE(next.value("entries").toArray().size(), 5); QVERIFY(next.value("nextCursor").toString().isEmpty());
         for (const auto &entry : page.value("entries").toArray() + next.value("entries").toArray())
             QVERIFY(entry.toObject().value("name").toString() != "link");
         QVERIFY(removeNativeTestLink(root.filePath("Files/link")));

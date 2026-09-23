@@ -19,9 +19,11 @@ static QByteArray readFile(const QString &path) { QFile f(path); if (!f.open(QIO
 class ReplicaTests : public QObject {
     Q_OBJECT
 private slots:
-    void fixedDirectoriesSurviveRemoteDeletionReplacementAndReplay() {
+    void formerDefaultNamesAcceptRemoteDeletionReplacementAndReplay() {
         QTemporaryDir dir(SYNC_TEST_DIRECTORY "/fixed-files-XXXXXX");
         QVERIFY(iiSocietyContainer::SocietyDrive::create(dir.path()));
+        for (const auto *name : {"Documents", "Audios", "3D objects"})
+            QVERIFY(QDir().mkpath(dir.filePath("Files/" + QString(name))));
         Replica replica; QVERIFY(replica.open(dir.path(), scope)); QVERIFY(replica.scan());
         const auto revision = [&](const QString &path, const QString &kind, const QByteArray &bytes = {}) {
             auto clock = replica.record(path).value("clock").toObject();
@@ -38,8 +40,8 @@ private slots:
                 const auto response = replica.handle("legacy", {{"action", "apply"}, {"entry", deleted}});
                 QVERIFY2(response.value("ok").toBool(), qPrintable(QJsonDocument(response).toJson()));
                 QVERIFY(response.value("complete").toBool());
-                QVERIFY(QFileInfo(dir.filePath("Files/" + QString(name))).isDir());
-                QCOMPARE(replica.record(path).value("kind"), "directory");
+                QVERIFY(!QFileInfo::exists(dir.filePath("Files/" + QString(name))));
+                QCOMPARE(replica.record(path).value("kind"), "deleted");
             }
         }
         const QByteArray contents("preserved legacy file");
@@ -49,11 +51,11 @@ private slots:
         QVERIFY(response.value("ok").toBool()); QVERIFY(!response.value("complete").toBool());
         QVERIFY(replica.handle("legacy", {{"action", "chunk"}, {"entry", replacement}, {"offset", "0"}, {"data", QString::fromLatin1(contents.toBase64())}}).value("ok").toBool());
         QVERIFY(replica.handle("legacy", {{"action", "commit"}, {"entry", replacement}}).value("ok").toBool());
-        QVERIFY(QFileInfo(dir.filePath("Files/Documents")).isDir());
-        QCOMPARE(replica.record("files/Documents").value("kind"), "directory");
-        const auto copies = QDir(dir.filePath("Files")).entryList({"Documents.sync-conflict-*"}, QDir::Files);
-        QCOMPARE(copies.size(), 1); QCOMPARE(readFile(dir.filePath("Files/" + copies.first())), contents);
+        QCOMPARE(readFile(dir.filePath("Files/Documents")), contents);
+        QCOMPARE(replica.record("files/Documents").value("kind"), "file");
+        QVERIFY(QDir(dir.filePath("Files")).entryList({"Documents.sync-conflict-*"}, QDir::Files).isEmpty());
         QVERIFY(replica.handle("legacy", {{"action", "begin"}, {"entry", replacement}}).value("complete").toBool());
+        QVERIFY(QFile::remove(dir.filePath("Files/Documents")));
         writeFile(dir.filePath("Files/Documents/movie.mp4"), "editable video"); QVERIFY(replica.scan());
         const auto child = revision("files/Documents/movie.mp4", "deleted");
         QVERIFY(replica.handle("legacy", {{"action", "apply"}, {"entry", child}}).value("ok").toBool());
@@ -61,7 +63,7 @@ private slots:
         QVERIFY(QFileInfo(dir.filePath("Files/Documents")).isDir());
     }
 
-    void hostAdoptionKeepsFixedDirectoriesAndArchivesTheirContents() {
+    void hostAdoptionArchivesUserDirectoriesAndLeavesFilesEmpty() {
         QTemporaryDir local(SYNC_TEST_DIRECTORY "/fixed-adoption-XXXXXX"), host(SYNC_TEST_DIRECTORY "/fixed-host-XXXXXX");
         QVERIFY(iiSocietyContainer::SocietyDrive::create(local.path()));
         QVERIFY(iiSocietyContainer::SocietyDrive::create(host.path()));
@@ -72,8 +74,7 @@ private slots:
         QCOMPARE(readFile(local.filePath(recovery + "/Files/Documents/old.mp4")), "local video");
         QVERIFY(!QFileInfo::exists(local.filePath("Files/Documents/old.mp4")));
         QVERIFY(client.bootstrapping());
-        for (const auto name : {"Documents", "Audios", "3D objects"})
-            QVERIFY(QFileInfo(local.filePath("Files/" + QString(name))).isDir());
+        QVERIFY(QDir(local.filePath("Files")).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).isEmpty());
         client.close(); QVERIFY(client.open(local.path(), scope));
         QVERIFY(client.completeBootstrap());
         QVERIFY(iiSocietyContainer::SocietyDrive::open(local.path())->isReady());
@@ -101,11 +102,11 @@ private slots:
         QVERIFY(!host.handle("sender", outOfOrder).value("ok").toBool());
         page.insert("offset", "1"); page.insert("entries", QJsonArray{entries[1]});
         response = host.handle("sender", page); QVERIFY(response.value("ok").toBool()); QVERIFY(response.value("complete").toBool());
-        QCOMPARE(QDir(b.filePath("Files")).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size(), 3); QVERIFY(host.record("files/one").isEmpty());
+        QCOMPARE(QDir(b.filePath("Files")).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size(), 0); QVERIFY(host.record("files/one").isEmpty());
         QCOMPARE(host.changes().value("through").toString(), "0");
         page.insert("offset", "0"); page.insert("entries", entries); page.insert("manifest", QString(64, 'f'));
         QCOMPARE(host.handle("sender", page).value("error"), "manifest_hash_mismatch");
-        QCOMPARE(QDir(b.filePath("Files")).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size(), 3);
+        QCOMPARE(QDir(b.filePath("Files")).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size(), 0);
     }
     void sectionInventoryAndLocalBoundary() {
         QTemporaryDir dir(SYNC_TEST_DIRECTORY "/replica-XXXXXX");
@@ -117,7 +118,7 @@ private slots:
             const auto entry = value.toObject(); QVERIFY(Replica::validRecord(entry));
             QCOMPARE(entry.value("kind").toString(), "directory");
             const auto path = entry.value("path").toString();
-            QVERIFY((path.startsWith("models/") || QStringList{"files/Documents", "files/Audios", "files/3D objects"}.contains(path)));
+            QVERIFY(path.startsWith("models/"));
         }
         const auto baseline = initial.value("through").toString().toLongLong();
         for (const auto section : iiSocietyContainer::allStoreSections())

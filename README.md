@@ -30,7 +30,7 @@
 
 `BleDiscovery`/`NearbyBootstrap`이 근처 기기와 작은 연결 정보를 교환한다. 인증된 Wi-Fi/LAN 파일 전송은 최대 4개 조각을 동시에 처리하며 iiServerHost 0.6의 바이너리 본문 협상을 사용한다. [연결 흐름, API, 플랫폼 지원과 검증 범위](NearbySync.md)를 참고한다. 호스트 권한·확정 리비전·공급자 분리는 [Namespace 계약](Namespace.md)을 따른다. 재개·SHA-256 검증은 유지한다.
 
-`iiSocietyContainer` 0.14.0 이상을 사용한다. `Files/Documents`, `Files/Audios`, `Files/3D objects`는 삭제할 수 없는 기본 디렉터리이다. 최상위 `Photos/`는 `photos` 섹션 키로 사진 객체·프리뷰를 동기화한다. 원격 삭제가 도착해도 빈 기본 폴더를 유지하며 더 높은 로컬 버전으로 기록하여 반복 전송을 처리한다. 해당 경로를 파일로 교체하는 요청은 충돌 사본으로 보존한다. 폴더 내부 항목의 생성·수정·삭제는 기존 동기화 규칙을 따른다. 최초 호스트 채택 시 기본 폴더 내부의 이전 데이터만 복구 영역으로 보관하고 폴더 자체는 유지한다. `Replica` 테스트는 삭제·파일 교체·재전송·자식 삭제·호스트 채택을 검사한다.
+`iiSocietyContainer` 0.14.0 이상을 사용한다. Files에는 기본 디렉터리가 없다. Documents, Audios, 3D objects도 일반 사용자 항목이며 원격 삭제·파일 교체와 재전송을 동일하게 처리한다. 비어 있지 않은 로컬 디렉터리의 미동기화 내용은 기존 충돌 보존 규칙을 따른다. 최초 호스트 채택은 기존 사용자 폴더 전체를 복구 영역으로 보관하고 Files에 빈 기본 폴더를 남기지 않는다. `Replica`와 `Controller` 테스트는 이 계약을 검증한다. 최상위 `Photos/`는 독립된 `photos` 섹션이다.
 
 서로 다른 기기에서 실행 중인 Society의 컨테이너 데이터를 동기화하는 C++23/Qt SDK이다. 같은 계정의 인증된 Society 연결을 받아 변경 감지, 양방향 전송, 중단 복구, 충돌 보존을 수행한다. `helloWorld()`는 기존 소비자 호환용으로 유지한다.
 
@@ -170,3 +170,17 @@ Photos는 Container 0.13.0의 최상위 섹션이다. `allStoreSections()`에서
 ## Source layout
 
 Implementation files and their headers live together under `src/`. Existing feature and platform subdirectories retain their responsibilities. Build configuration, tests, documentation, resources, and maintenance scripts remain at the project root. Configure and build using the repository-local `build/` directory.
+# Native Files volume
+
+On macOS, Society's public APFS volume contains only the Files namespace. `ConfinedFiles` resolves
+the Files section through the container SDK's verified volume identity; other sections and recovery
+metadata remain on the private data volume. Public-volume removal invalidates the open filesystem.
+Transfers crossing these two volumes copy to a temporary destination before publishing the file, and
+recovery copies preserve the previous bytes. Arbitrary symlinks remain rejected. Native integration
+coverage lives in `tests/confined_files.cpp`; all fixtures are created below `build/`.
+
+`Controller::setPeers` accepts an authenticated account host and container expectation. A matching authority may replace the old mirror host; existing data and pending edits move to `.society-sync/detached/` before adoption. A mismatched host/container fails before any adoption or upload. Without an explicit expectation, the existing primary-host restriction remains.
+
+### Local failure diagnostics
+
+Set `SOCIETY_SYNC_TRACE=1` when launching a development build to log changed synchronization error messages. It is disabled by default and does not print account credentials, proof keys or protocol payloads. The UI retry state alone does not establish a successful host connection.

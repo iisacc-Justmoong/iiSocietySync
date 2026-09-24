@@ -44,6 +44,7 @@ public:
     bool resident(const QString &path) const;
     QStringList requestedPaths();
     void completeRequests();
+    QJsonArray missingPhotoIdentities() const;
     QJsonArray missingPreviews() const;
     bool savePreview(const QJsonObject &entry, const QJsonObject &response);
     // Confirmed namespace metadata is distinct from the device's working files.

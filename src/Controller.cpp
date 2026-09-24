@@ -135,6 +135,7 @@ public:
         connect(sync, &Synchronizer::mirrorChanged, this, [this](auto binding) {
             stopIndexing(); emit mirrorChanged(generation, binding);
         });
+        connect(sync, &Synchronizer::hostValidated, this, [this](const QString &peer) { emit hostValidated(generation, peer); });
         connect(sync, &Synchronizer::finished, this, [this](const QString &peer, bool ok, const QString &error) {
             refreshWatches();
             publishNamespace();
@@ -243,6 +244,7 @@ signals:
     void result(quint64 generation, QString key, QJsonObject response);
     void status(quint64 generation, bool available, bool busy, QString error);
     void synchronized(quint64 generation, QString peer);
+    void hostValidated(quint64 generation, QString peer);
     void progress(quint64 generation, QString path, qint64 done, qint64 total);
     void verificationProgress(quint64 generation, QString path, qint64 done, qint64 total);
     void inspected(quint64 revision, QString path, QString scope, QJsonObject binding, QString identifier, QString primary);
@@ -314,6 +316,7 @@ public:
             if (generation != cancellation->load() || !jobs.contains(key)) return;
             jobs[key].result = result; jobs[key].finished = true;
         });
+        QObject::connect(worker, &SyncWorker::hostValidated, q, [this](quint64 generation, const QString &peer) { if (generation == cancellation->load()) emit q->hostValidated(peer); });
         QObject::connect(worker, &SyncWorker::synchronized, q, [this](quint64 generation, const QString &peer) { if (generation == cancellation->load()) emit q->synchronized(peer); });
         QObject::connect(worker, &SyncWorker::progress, q, [this](quint64 generation, const QString &path, qint64 done, qint64 total) { if (generation == cancellation->load()) emit q->progress(path, done, total); });
         QObject::connect(worker, &SyncWorker::verificationProgress, q, [this](quint64 generation, const QString &path, qint64 done, qint64 total) {

@@ -184,3 +184,7 @@ coverage lives in `tests/confined_files.cpp`; all fixtures are created below `bu
 ### Local failure diagnostics
 
 Set `SOCIETY_SYNC_TRACE=1` when launching a development build to log changed synchronization error messages. It is disabled by default and does not print account credentials, proof keys or protocol payloads. The UI retry state alone does not establish a successful host connection.
+
+초기 `MetadataFirst` 연결은 사진 식별 파일과 미리보기의 전체 다운로드를 기다리지 않는다. 호스트의 검증된 목록과 모델 인덱스를 먼저 준비하고, 사진 식별 파일은 후속 동기화에서 최대 16개씩 복구한다. 미보유 목록은 디스크에 유지되어 재시작 후에도 이어지며, 원본 모델은 명시적으로 요청한 경우에만 내려받는다.
+
+`hostValidated`는 현재 인증된 전송에서 호스트/컨테이너 일치와 준비된 미러를 확인한 시점이다. 첫 연결에서는 부트스트랩 완료 이후에만 발생한다. `synchronized`의 전체 왕복 완료 의미는 유지하며, 소비자는 사진 업로드 대기열과 온보딩 준비 상태를 분리할 수 있다.

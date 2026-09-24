@@ -24,6 +24,8 @@ public:
     void receive(const QString &requestId, const QJsonObject &response);
 signals:
     void mirrorChanged(QJsonObject binding);
+    // Current authenticated host matches a ready mirror; payload queues may remain busy.
+    void hostValidated(QString peer);
     void requestReady(QString id, QString peer, QJsonObject payload);
     void progress(QString path, qint64 completedBytes, qint64 totalBytes);
     void finished(QString peer, bool success, QString error);

@@ -32,7 +32,7 @@ public:
     Synchronizer *q; Replica *store; QTimer timeout;
     bool active = false; quint64 generation = 0;
     ContentPolicy policy = ContentPolicy::FullReplica;
-    QStringList requested;
+    QStringList requested, photoIdentities;
     QJsonArray previews;
     qsizetype previewIndex = 0;
     bool previewsDone = false;
@@ -131,6 +131,7 @@ public:
                 finish(false, r.value("protocol") != 2 ? "host_mirror_protocol_required" : store->errorString()); return;
             }
             emit q->mirrorChanged(store->binding());
+            if (!store->bootstrapping()) emit q->hostValidated(peer);
             manifests = r.value("manifestVersion").toInt() == 1;
             window = qMin(configuredWindow, qBound(1, r.value("transferWindow").toInt(1), 4));
             remoteId = r.value("replica").toString(); remoteContainer = r.value("container").toString();
@@ -182,6 +183,15 @@ public:
                     if (e.value("kind") == "file") entries.append(e);
                 }
             }
+            photoIdentities.clear();
+            if (policy == ContentPolicy::MetadataFirst && !store->bootstrapping()) {
+                for (const auto &value : store->missingPhotoIdentities()) {
+                    const auto entry = value.toObject(); const auto path = entry.value("path").toString();
+                    photoIdentities.append(path);
+                    if (std::none_of(entries.cbegin(), entries.cend(), [&](const auto &e) { return e.value("path") == path; }))
+                        entries.append(entry);
+                }
+            }
             announceLocal([this] { orderDownloads(); index = 0; pullNext(); });
         });
     }
@@ -190,8 +200,10 @@ public:
         const auto path = entry.value("path").toString();
         const auto local = store->record(path);
         const auto bytes = entry.value("size").toString().toLongLong();
-        const bool identity = (path.startsWith("photos/") && (path.endsWith(".societyphoto") || path.startsWith("photos/.previews/"))
-            && bytes <= 512 * 1024) || (path.startsWith("models/") && path.endsWith("/model_index.json") && bytes <= 1024 * 1024);
+        // A large gallery must not gate first connection. Its small identities
+        // hydrate in bounded later rounds; model indexes remain immediately usable.
+        const bool identity = photoIdentities.contains(path)
+            || (path.startsWith("models/") && path.endsWith("/model_index.json") && bytes <= 1024 * 1024);
         const bool pending = !local.isEmpty() && !local.contains("revision");
         return !identity && !requested.contains(path) && !pending && local.value("kind") != "directory";
     }
@@ -308,6 +320,7 @@ public:
                 if (!caughtUp) { page(pulled, 0); return; }
                 if (!store->completeBootstrap()) { finish(false, store->errorString()); return; }
                 emit q->mirrorChanged(store->binding());
+                emit q->hostValidated(peer);
             }
             if (!store->scan()) { finish(false, store->errorString()); return; }
             announceLocal([this] { entries = outgoing; through = pushThrough; index = 0; order(entries); pushNext(); }); return;

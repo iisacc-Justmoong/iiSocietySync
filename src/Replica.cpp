@@ -663,6 +663,21 @@ void Replica::completeRequests() {
         if (ready) map.finishRequest(request.value("id").toString());
     }
 }
+QJsonArray Replica::missingPhotoIdentities() const {
+    QJsonArray result;
+    if (!isOpen()) return result;
+    QSqlQuery q(d->db); if (!q.exec("SELECT data FROM entries WHERE stamp='remote' ORDER BY path")) return result;
+    while (q.next()) {
+        const auto local = QJsonDocument::fromJson(q.value(0).toByteArray()).object();
+        const auto path = local.value("path").toString();
+        if (!path.startsWith("photos/") || (!path.endsWith(".societyphoto") && !path.startsWith("photos/.previews/"))) continue;
+        auto entry = objectMetadata(path); entry.remove("locations");
+        if (entry.value("kind") != "file" || entry.value("size").toString().toLongLong() > 512 * 1024) continue;
+        result.append(entry);
+        if (result.size() >= 16) break;
+    }
+    return result;
+}
 QJsonArray Replica::missingPreviews() const {
     QJsonArray result;
     if (!isOpen()) return result;

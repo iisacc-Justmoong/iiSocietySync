@@ -8,6 +8,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QImage>
+#include <QUuid>
 using namespace iiSocietySync;
 static void put(const QString &path, const QByteArray &data) {
     QDir().mkpath(QFileInfo(path).absolutePath()); QFile f(path);
@@ -27,6 +28,46 @@ class OnDemandTests : public QObject {
         QVERIFY2(done[0][1].toBool(), qPrintable(done[0][2].toString()));
     }
 private slots:
+    void validatedHostDoesNotWaitForPendingUploads() {
+        QTemporaryDir a(SYNC_TEST_DIRECTORY "/ready-upload-a-XXXXXX"), b(SYNC_TEST_DIRECTORY "/ready-upload-b-XXXXXX");
+        QVERIFY(iiSocietyContainer::SocietyDrive::create(a.path())); QVERIFY(iiSocietyContainer::SocietyDrive::create(b.path()));
+        Replica phone, host; QVERIFY(phone.open(a.path(), QString(64, 'a'))); QVERIFY(host.open(b.path(), QString(64, 'a')));
+        QStringList reads; cycle(phone, host, reads);
+        put(a.filePath("Files/pending.bin"), QByteArray(800123, 'p'));
+        Synchronizer sync(&phone); sync.setContentPolicy(Synchronizer::ContentPolicy::MetadataFirst);
+        sync.setExpectedHost("host", host.containerId());
+        QSignalSpy validated(&sync, &Synchronizer::hostValidated), done(&sync, &Synchronizer::finished);
+        bool uploading = false;
+        connect(&sync, &Synchronizer::requestReady, &sync, [&](auto id, auto, auto wire) {
+            const auto request = wire.value("message").toObject();
+            if (request.value("action") == "chunk") { uploading = true; return; }
+            sync.receive(id, {{"ok", true}, {"result", host.handle("phone", request)}});
+        });
+        QVERIFY(sync.start("host")); QTRY_VERIFY_WITH_TIMEOUT(uploading, 3000);
+        QCOMPARE(validated.size(), 1); QVERIFY(done.isEmpty()); QVERIFY(sync.busy()); sync.stop();
+        validated.clear(); done.clear();
+        sync.setExpectedHost("host", QUuid::createUuid().toString(QUuid::WithoutBraces));
+        QVERIFY(sync.start("host")); QTRY_COMPARE(done.size(), 1);
+        QVERIFY(!done.first()[1].toBool()); QVERIFY(validated.isEmpty());
+    }
+    void firstConnectionDoesNotWaitForThePhotoLibrary() {
+        QTemporaryDir a(SYNC_TEST_DIRECTORY "/first-gallery-a-XXXXXX"), b(SYNC_TEST_DIRECTORY "/first-gallery-b-XXXXXX");
+        QVERIFY(iiSocietyContainer::SocietyDrive::create(a.path())); QVERIFY(iiSocietyContainer::SocietyDrive::create(b.path()));
+        for (int i = 0; i < 20; ++i) put(b.filePath(QString("Photos/%1.societyphoto").arg(i)), "photo identity");
+        put(b.filePath("Models/Checkpoint/model.safetensors"), "remote model");
+        Replica phone, host; QVERIFY(phone.open(a.path(), QString(64, 'a'))); QVERIFY(host.open(b.path(), QString(64, 'a')));
+        QStringList reads; cycle(phone, host, reads);
+        QVERIFY(reads.isEmpty()); QVERIFY(!phone.bootstrapping());
+        auto drive = iiSocietyContainer::SocietyDrive::open(a.path()); QVERIFY(drive && drive->isReady());
+        iiSocietyContainer::StorageMap map(*drive);
+        QCOMPARE(map.object("models/Checkpoint/model.safetensors").value("kind"), "file");
+        cycle(phone, host, reads); QCOMPARE(reads.size(), 16);
+        // Remaining identities survive process restart and hydrate in the next bounded round.
+        phone.close(); QVERIFY(phone.open(a.path(), QString(64, 'a')));
+        reads.clear(); cycle(phone, host, reads); QCOMPARE(reads.size(), 4);
+        for (int i = 0; i < 20; ++i) QVERIFY(phone.resident(QString("photos/%1.societyphoto").arg(i)));
+        QVERIFY(!phone.resident("models/Checkpoint/model.safetensors"));
+    }
     void metadataIsVisibleWhileAnUnrelatedConflictWaitsForBytes() {
         QTemporaryDir a(SYNC_TEST_DIRECTORY "/metadata-priority-a-XXXXXX"), b(SYNC_TEST_DIRECTORY "/metadata-priority-b-XXXXXX");
         QVERIFY(iiSocietyContainer::SocietyDrive::create(a.path())); QVERIFY(iiSocietyContainer::SocietyDrive::create(b.path()));

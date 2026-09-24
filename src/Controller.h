@@ -46,6 +46,7 @@ signals:
     void mirrorChanged(QJsonObject binding);
     void changed();
     void synchronized(QString peer);
+    void hostValidated(QString peer);
     void progress(QString path, qint64 completedBytes, qint64 totalBytes);
     void verificationProgress(QString path, qint64 completedBytes, qint64 totalBytes);
     void containerInspected(QString path, QString scope, QJsonObject binding,

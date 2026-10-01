@@ -39,7 +39,7 @@ add_library(iiSocietySync ${sync_library_type} src/iiSocietySync.cpp src/iiSocie
     src/Replica.cpp src/Replica.h src/ConfinedFiles.cpp src/ConfinedFiles.h src/Synchronizer.cpp src/Synchronizer.h
     src/NamespaceJournal.cpp src/NamespaceJournal.h
     src/ObjectProvider.cpp src/ObjectProvider.h
-    src/Controller.cpp src/Controller.h src/RemoteFiles.cpp src/RemoteFiles.h
+    src/Controller.cpp src/Controller.h src/WatchPaths.h src/RemoteFiles.cpp src/RemoteFiles.h
     src/NearbyBootstrap.cpp src/NearbyBootstrap.h src/BleDiscovery.cpp src/BleDiscovery.h)
 add_library(iiSocietySync::iiSocietySync ALIAS iiSocietySync)
 if(WIN32)
@@ -65,6 +65,12 @@ set_target_properties(iiSocietySync PROPERTIES
     INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 if(BUILD_TESTING)
+    add_executable(iiSocietySync_watch_paths_tests tests/watch_paths.cpp)
+    set_target_properties(iiSocietySync_watch_paths_tests PROPERTIES AUTOMOC OFF CXX_EXTENSIONS OFF)
+    target_compile_features(iiSocietySync_watch_paths_tests PRIVATE cxx_std_23)
+    target_include_directories(iiSocietySync_watch_paths_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_compile_definitions(iiSocietySync_watch_paths_tests PRIVATE SYNC_TEST_DIRECTORY="${CMAKE_CURRENT_BINARY_DIR}")
+    add_test(NAME iiSocietySync.WatchPaths COMMAND iiSocietySync_watch_paths_tests)
     find_package(Qt6 6.8.3 EXACT REQUIRED COMPONENTS Test)
     set(IISOCIETYSYNC_TEST_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}" CACHE STRING "Test data directory as seen by the target runtime")
     add_executable(iiSocietySync_indexing_tests tests/indexing.cpp)

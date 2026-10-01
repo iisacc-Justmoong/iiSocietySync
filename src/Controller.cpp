@@ -3,9 +3,11 @@
 #include <QDebug>
 #include "Synchronizer.h"
 #include "ObjectProvider.h"
+#include "WatchPaths.h"
 #include <SharedStorage.h>
 #include <QDateTime>
 #include <QDir>
+#include <QFile>
 #include <QFileSystemWatcher>
 #include <QJsonDocument>
 #include <QPointer>
@@ -211,26 +213,30 @@ public:
     }
     void refreshWatches() {
         if (container.isEmpty()) return;
-        QSet<QString> wanted;
-        QStringList directories;
-        for (const auto section : iiSocietyContainer::allStoreSections())
-            directories.append(QDir(container).filePath(iiSocietyContainer::storeSectionName(section)));
+        std::vector<std::filesystem::path> roots;
+        for (const auto section : iiSocietyContainer::allStoreSections()) {
+            const auto path = QDir(container).filePath(iiSocietyContainer::storeSectionName(section));
+#ifdef Q_OS_WIN
+            roots.emplace_back(path.toStdU16String());
+#else
+            roots.emplace_back(QFile::encodeName(path).toStdString());
+#endif
+        }
         // Apple kqueue consumes file descriptors for watched paths. Preserve
         // room for TLS, SQLite and payloads even when the library is very large.
         // Periodic full indexing covers paths outside this bounded watch set.
         const auto limit = watchPathLimit();
-        while (!directories.isEmpty() && wanted.size() < limit && cancellation->load() == generation) {
-            const auto path = directories.takeLast(); const QFileInfo directory(path);
-            if (!directory.isDir() || directory.isSymLink()) continue;
-            wanted.insert(path);
-            if (wanted.size() >= limit) break;
-            const auto children = QDir(path).entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::NoSymLinks | QDir::Hidden);
-            for (const auto &entry : children) {
-                if (entry.fileName().startsWith(".society-") || entry.fileName().startsWith(".iiserverhost-")) continue;
-                if (entry.isDir()) directories.append(entry.absoluteFilePath());
-                else if (entry.isFile()) wanted.insert(entry.absoluteFilePath());
-                if (wanted.size() >= limit) break;
-            }
+        const auto discovered = detail::collectWatchPaths(roots, std::size_t(limit),
+            [this] { return cancellation->load() != generation; });
+        // Never replace a valid watch set with an interrupted partial result.
+        if (discovered.cancelled) return;
+        QSet<QString> wanted;
+        for (const auto &path : discovered.paths) {
+#ifdef Q_OS_WIN
+            wanted.insert(QString::fromStdWString(path.native()));
+#else
+            wanted.insert(QFile::decodeName(path.c_str()));
+#endif
         }
         const auto paths = watcher->directories() + watcher->files(); const QSet<QString> existing(paths.begin(), paths.end());
         const auto removed = existing - wanted, added = wanted - existing;

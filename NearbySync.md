@@ -46,3 +46,21 @@ Apple 앱에는 `NSBluetoothAlwaysUsageDescription`, Android에는 scan/connect/
 `Bootstrap`은 메타데이터 상한·페이지 오염·비밀정보 필드 거부를, `Synchronizer`는 지연/역순/중복 응답·구형 호스트 협상·작은 변경 우선 처리를 검사한다. `SocketTransfer`는 실제 loopback TCP/TLS에서 8 MiB 이상 파일의 다운로드 중단·재개·업로드·SHA-256·접근 철회를 검사한다. iiServerHost의 LAN 테스트는 바이너리 프레임 크기·양방향 소켓 전송·구형 JSON 클라이언트를 검사한다.
 
 자동 테스트는 실제 무선 스캔을 켜지 않는다. 빌드와 소켓 테스트는 BLE 무선 발견·GATT 교환의 실기기 성공 증거가 아니며, 실제 무선 처리량과 절전 상태 복귀는 별도 두 기기 검증이 필요하다.
+
+## Bounded filesystem watch discovery
+
+Native watch discovery streams directory entries with the standard C++23
+filesystem iterator instead of materializing and sorting entire directories.
+Section roots receive priority. The descriptor budget bounds both selected paths
+and queued subdirectories; discovery also inspects at most eight times that budget
+so internal or unsupported entries cannot force an unbounded scan. Hidden user
+files remain eligible, while symlinks and `.society-` / `.iiserverhost-` trees do not.
+Periodic indexing remains responsible for paths outside the watch budget.
+
+Cancellation is checked before filesystem operations and between entries. A
+cancelled discovery preserves the existing watch set. This bounds application
+work, not an operating-system read already stalled on a slow volume; it does not
+remove the ownership safety barrier in `closeAndWait()`.
+
+The Qt-free `iiSocietySync.WatchPaths` regression covers selection and traversal
+budgets, hidden files, excluded trees, symlink roots, zero budget and cancellation.

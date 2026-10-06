@@ -3,6 +3,12 @@
 #include <limits>
 #include <set>
 #include <vector>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace iiSocietySync::detail {
 struct WatchPaths {
@@ -31,12 +37,21 @@ WatchPaths collectWatchPaths(const std::vector<std::filesystem::path> &roots,
         result.paths.push_back(path);
         if (directory) directories.push_back(path);
     };
+    const auto reparse = [](const fs::path &path) {
+#ifdef _WIN32
+        const auto attributes = GetFileAttributesW(path.c_str());
+        return attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT);
+#else
+        (void)path;
+        return false;
+#endif
+    };
     // Give every section root priority over any one section's descendants.
     for (const auto &root : roots) {
         if (cancelled()) { result.cancelled = true; return result; }
         if (result.paths.size() >= limit) break;
         std::error_code error;
-        if (fs::is_directory(fs::symlink_status(root, error)) && !error) include(root, true);
+        if (!reparse(root) && fs::is_directory(fs::symlink_status(root, error)) && !error) include(root, true);
     }
     for (std::size_t next = 0; next < directories.size() && result.paths.size() < limit
          && result.visitedEntries < inspectionLimit; ++next) {
@@ -51,7 +66,7 @@ WatchPaths collectWatchPaths(const std::vector<std::filesystem::path> &roots,
             if (!name.starts_with(societyPrefix) && !name.starts_with(hostPrefix)) {
                 std::error_code statusError;
                 const auto status = entry->symlink_status(statusError);
-                if (!statusError && (fs::is_directory(status) || fs::is_regular_file(status)))
+                if (!statusError && !reparse(entry->path()) && (fs::is_directory(status) || fs::is_regular_file(status)))
                     include(entry->path(), fs::is_directory(status));
             }
             // Do not fetch another directory block once the budget is full.

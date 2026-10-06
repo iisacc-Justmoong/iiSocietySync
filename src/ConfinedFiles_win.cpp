@@ -1,6 +1,7 @@
 #include "ConfinedFiles.h"
 #include <QCryptographicHash>
 #include <QDir>
+#include <QDebug>
 #include <QFileInfo>
 #include <QUuid>
 #include <qt_windows.h>
@@ -70,7 +71,11 @@ bool setInformation(HANDLE file, void *data, ULONG bytes, ULONG kind) {
     static const auto function = reinterpret_cast<Function>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtSetInformationFile"));
     if (!function) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
     IO_STATUS_BLOCK status{}; const auto result = function(file, &status, data, bytes, kind);
-    if (result < 0) { SetLastError(RtlNtStatusToDosError(result)); return false; }
+    if (result < 0) {
+        const auto error = RtlNtStatusToDosError(result);
+        qWarning() << "ConfinedFiles native namespace operation:" << kind << error;
+        SetLastError(error); return false;
+    }
     return true;
 }
 bool nameOperation(HANDLE source, HANDLE parent, const QString &name, ULONG kind, bool replace) {
@@ -83,7 +88,7 @@ bool nameOperation(HANDLE source, HANDLE parent, const QString &name, ULONG kind
 }
 }
 
-// Every ancestor remains open without delete/write sharing until the operation
+// Every directory ancestor remains open without delete sharing until the operation
 // finishes. All child opens and namespace mutations are relative to those
 // handles; no checked absolute pathname is reopened for an operation.
 struct ConfinedFiles::WinPath {
@@ -96,6 +101,7 @@ struct ConfinedFiles::WinPath {
         OBJECT_ATTRIBUTES object{}; object.Length = sizeof(object); object.RootDirectory = get();
         object.ObjectName = &text; object.Attributes = OBJ_CASE_INSENSITIVE;
         HANDLE file = INVALID_HANDLE_VALUE; IO_STATUS_BLOCK status{};
+        if (options & FILE_DIRECTORY_FILE) share |= FILE_SHARE_WRITE;
         const auto result = NtCreateFile(&file, access | FILE_READ_ATTRIBUTES | SYNCHRONIZE, &object, &status, nullptr,
             FILE_ATTRIBUTE_NORMAL, share, create ? FILE_OPEN_IF : FILE_OPEN,
             options | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT, nullptr, 0);
@@ -115,7 +121,7 @@ struct ConfinedFiles::WinPath {
         if (type != DRIVE_FIXED && type != DRIVE_REMOVABLE) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
         const auto native = QStringLiteral("\\\\?\\") + drive;
         const auto file = CreateFileW(reinterpret_cast<LPCWSTR>(native.utf16()), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-            FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
         if (file == INVALID_HANDLE_VALUE) return false;
         handles.push_back(file);
         for (const auto &name : path.mid(3).split('/', Qt::SkipEmptyParts))
@@ -138,6 +144,7 @@ bool ConfinedFiles::open(const QString &path) {
     const auto probe = ".society-sync/capability-" + QUuid::createUuid().toString(QUuid::WithoutBraces);
     const bool usable = mkdir(".society-sync") && append(probe, 0, "probe")
         && preserve(probe, probe + ".link") && read(probe + ".link", 0, 5) == "probe";
+    if (!usable) qWarning() << "ConfinedFiles capability probe:" << error << GetLastError();
     const bool sourceRemoved = remove(probe), copyRemoved = remove(probe + ".link");
     if (!usable || !sourceRemoved || !copyRemoved) { root.clear(); return fail("sync_requires_local_hardlink_storage"); }
     return true;

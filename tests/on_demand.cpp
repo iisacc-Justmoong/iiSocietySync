@@ -62,6 +62,7 @@ private slots:
         iiSocietyContainer::StorageMap map(*drive);
         QCOMPARE(map.object("models/Checkpoint/model.safetensors").value("kind"), "file");
         cycle(phone, host, reads); QCOMPARE(reads.size(), 16);
+        QCOMPARE(QSet<QString>(reads.cbegin(), reads.cend()).size(), 16);
         // Remaining identities survive process restart and hydrate in the next bounded round.
         phone.close(); QVERIFY(phone.open(a.path(), QString(64, 'a')));
         reads.clear(); cycle(phone, host, reads); QCOMPARE(reads.size(), 4);

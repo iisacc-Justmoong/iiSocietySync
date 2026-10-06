@@ -1,3 +1,4 @@
+#include <QtCore/QSet>
 #include "Synchronizer.h"
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -33,6 +34,7 @@ public:
     bool active = false; quint64 generation = 0;
     ContentPolicy policy = ContentPolicy::FullReplica;
     QStringList requested, photoIdentities;
+    QSet<QString> hydratedPhotoIdentities;
     QJsonArray previews;
     qsizetype previewIndex = 0;
     bool previewsDone = false;
@@ -175,6 +177,7 @@ public:
             }
             if (r.value("more").toBool()) { journalPage(r.value("through").toString().toLongLong()); return; }
             requested = store->requestedPaths();
+            photoIdentities.clear();
             if (policy == ContentPolicy::MetadataFirst) {
                 for (const auto &path : requested) {
                     if (store->resident(path)) continue;
@@ -183,10 +186,11 @@ public:
                     if (e.value("kind") == "file") entries.append(e);
                 }
             }
-            photoIdentities.clear();
             if (policy == ContentPolicy::MetadataFirst && !store->bootstrapping()) {
                 for (const auto &value : store->missingPhotoIdentities()) {
                     const auto entry = value.toObject(); const auto path = entry.value("path").toString();
+                    if (hydratedPhotoIdentities.contains(path)) continue;
+                    if (photoIdentities.size() >= 16 - hydratedPhotoIdentities.size()) break;
                     photoIdentities.append(path);
                     if (std::none_of(entries.cbegin(), entries.cend(), [&](const auto &e) { return e.value("path") == path; }))
                         entries.append(entry);
@@ -372,6 +376,7 @@ public:
         if (offset == size) {
             if (!accepted(store->handle(peer, {{"action", "commit"}, {"entry", current}}))) return;
             if (!completeSelected()) return;
+            if (photoIdentities.contains(path)) hydratedPhotoIdentities.insert(path);
             ++index; schedule([this] { pullNext(); }); return;
         }
         if (refreshBetweenChunks()) return;
@@ -466,6 +471,7 @@ bool Synchronizer::start(const QString &peer) {
     d->active = true; ++d->generation; d->peer = peer; d->entries.clear();
     d->transferSlice.invalidate(); d->transferredInSlice = false;
     d->previewsDone = false; d->previews = {}; d->previewIndex = 0;
+    d->photoIdentities.clear(); d->hydratedPhotoIdentities.clear();
     d->pulled = 0; d->pushed = 0; d->timeout.start(); d->describe(); return true;
 }
 void Synchronizer::setExpectedHost(QString host, QString container) {

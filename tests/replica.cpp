@@ -214,17 +214,30 @@ private slots:
         QVERIFY(!replica.handle("peer", {{"action", "begin"}, {"entry", entry}}).value("ok").toBool());
         QCOMPARE(readFile(parent.filePath("outside")), QByteArray("outside"));
         QCOMPARE(replica.record("files/item").value("version"), entry.value("version"));
+#ifdef Q_OS_WIN
+        QVERIFY(!QDir(parent.path()).rename("drive", "old"));
+        QVERIFY(QFileInfo::exists(root + "/.society-drive.json"));
+        replica.close();
+        QVERIFY(removeNativeTestLink(root + "/Files/item"));
+#else
         QVERIFY(QDir(parent.path()).rename("drive", "old"));
         QVERIFY(QDir().mkdir(root));
         QVERIFY(iiSocietyContainer::SocietyDrive::create(root));
         QVERIFY(!replica.scan());
         QVERIFY(!replica.handle("peer", {{"action", "begin"}, {"entry", entry}}).value("ok").toBool());
         QVERIFY(!QFileInfo::exists(root + "/Files/item"));
+#endif
     }
     void redirectedJournalCannotWriteLocksOutsideContainer() {
         QTemporaryDir parent(SYNC_TEST_DIRECTORY "/journal-XXXXXX");
         const auto root = parent.filePath("drive"); QVERIFY(QDir().mkdir(root)); QVERIFY(iiSocietyContainer::SocietyDrive::create(root));
         Replica replica; QVERIFY(replica.open(root, scope));
+#ifdef Q_OS_WIN
+        QVERIFY(!QDir(root).rename(".society-sync", "saved-state"));
+        QVERIFY(replica.scan());
+        replica.close();
+        QVERIFY(QDir(root).rename(".society-sync", "saved-state"));
+#else
         QVERIFY(QDir(root).rename(".society-sync", "saved-state"));
         QVERIFY(QDir().mkdir(parent.filePath("outside")));
         QVERIFY(nativeTestLink(parent.filePath("outside"), root + "/.society-sync"));
@@ -232,6 +245,7 @@ private slots:
         QCOMPARE(QDir(parent.filePath("outside")).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size(), 0);
         replica.close();
         QVERIFY(removeNativeTestLink(root + "/.society-sync"));
+#endif
     }
     void filenameAliasesCannotOverwriteDistinctNames() {
         QTemporaryDir a(SYNC_TEST_DIRECTORY "/case-a-XXXXXX"), b(SYNC_TEST_DIRECTORY "/case-b-XXXXXX");

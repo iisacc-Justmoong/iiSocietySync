@@ -20,7 +20,12 @@ int main() {
         std::ofstream(root / "visible" / "file") << "payload";
         std::ofstream(root / ".society-private" / "secret") << "internal";
         std::ofstream(root / ".hidden") << "visible hidden file";
+#ifdef _WIN32
+        require(CreateSymbolicLinkW((root / "link").c_str(), (root / "visible").c_str(),
+            SYMBOLIC_LINK_FLAG_DIRECTORY | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE), "native directory symlink");
+#else
         fs::create_directory_symlink(root / "visible", root / "link");
+#endif
         const auto all = iiSocietySync::detail::collectWatchPaths({root}, 64, [] { return false; });
         require(!all.cancelled && all.paths.size() == 4, "exclude internal trees and symlinks, retain hidden files");
         for (int i = 0; i < 100; ++i) fs::create_directory(root / ("directory-" + std::to_string(i)));
@@ -40,6 +45,9 @@ int main() {
         for (int i = 0; i < 20; ++i) std::ofstream(root / "excluded-only" / (".society-" + std::to_string(i))) << "internal";
         const auto excluded = iiSocietySync::detail::collectWatchPaths({root / "excluded-only"}, 2, [] { return false; });
         require(excluded.paths.size() == 1 && excluded.visitedEntries == 16, "bound inspection even when no entries are eligible");
+#ifdef _WIN32
+        require(RemoveDirectoryW((root / "link").c_str()), "remove native directory symlink");
+#endif
         std::cout << "bounded watch traversal contracts passed\n";
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n'; return 1;

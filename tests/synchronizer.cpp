@@ -157,7 +157,13 @@ private slots:
             if (action == "manifest" && response.value("complete").toBool()) manifestComplete = true;
             sync.receive(id, {{"ok", true}, {"result", response}});
         });
-        QVERIFY(sync.start("host")); QTRY_COMPARE_WITH_TIMEOUT(done.size(), 1, 20000);
+        QVERIFY(sync.start("host")); QTRY_COMPARE_WITH_TIMEOUT(done.size(), 1,
+#ifdef Q_OS_WIN
+            60000 // Native per-file metadata probes on the external NTFS volume.
+#else
+            20000
+#endif
+        );
         QVERIFY2(done[0][1].toBool(), qPrintable(done[0][2].toString()));
         QVERIFY(pages >= 2); QVERIFY(sawBytes);
         QCOMPARE(get(a.filePath("Models/remote")), QByteArray("download"));

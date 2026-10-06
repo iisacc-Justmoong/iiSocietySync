@@ -47,20 +47,12 @@ Apple 앱에는 `NSBluetoothAlwaysUsageDescription`, Android에는 scan/connect/
 
 자동 테스트는 실제 무선 스캔을 켜지 않는다. 빌드와 소켓 테스트는 BLE 무선 발견·GATT 교환의 실기기 성공 증거가 아니며, 실제 무선 처리량과 절전 상태 복귀는 별도 두 기기 검증이 필요하다.
 
-## Bounded filesystem watch discovery
+<a id="bounded-filesystem-watch-discovery"></a>
 
-Native watch discovery streams directory entries with the standard C++23
-filesystem iterator instead of materializing and sorting entire directories.
-Section roots receive priority. The descriptor budget bounds both selected paths
-and queued subdirectories; discovery also inspects at most eight times that budget
-so internal or unsupported entries cannot force an unbounded scan. Hidden user
-files remain eligible, while symlinks and `.society-` / `.iiserverhost-` trees do not.
-Periodic indexing remains responsible for paths outside the watch budget.
+## 한계가 설정된 파일 시스템 시계 탐색
 
-Cancellation is checked before filesystem operations and between entries. A
-cancelled discovery preserves the existing watch set. This bounds application
-work, not an operating-system read already stalled on a slow volume; it does not
-remove the ownership safety barrier in `closeAndWait()`.
+네이티브 감지 스트림은 전체 디렉토리를 구체화하고 정렬하는 대신 표준 C++23 파일 시스템 반복자를 사용하여 디렉토리 엔트리를 제공합니다. 섹션 루트가 우선순위를 받습니다. 설명자 예산은 선택된 경로 및 대기열 하위 디렉토리를 모두 제한하며, 감지는 또한 내부 또는 지원되지 않는 항목이 무제한 스캔을 강요할 수 없도록 예산을 최대 8 회 검사합니다. 숨겨진 사용자 파일은 자격이 유지되지만 심링크 및 `.society-` / `.iiserverhost-` 트리는 자격이 없습니다. 주기적 인덱싱은 감지 예산 밖의 경로에 대한 책임을 계속 유지합니다.
 
-The Qt-free `iiSocietySync.WatchPaths` regression covers selection and traversal
-budgets, hidden files, excluded trees, symlink roots, zero budget and cancellation.
+파일 시스템 작업과 항목 사이에서 취소가 확인됩니다. 취소된 발견은 기존 감시 세트를 보존합니다. 이는 이미 느린 볼륨에서 멈춰 있는 운영 체제 읽기를 제한하는 것이 아니라 애플리케이션 작업을 제한하며, `closeAndWait()` 에서 소유권 안전 장벽을 제거하지 않습니다.
+
+Qt -free `iiSocietySync.WatchPaths` 회귀는 선택 및 탐색 예산, 숨겨진 파일, 제외 트리, 심볼릭 링크 루트, 0 예산 및 취소를 포함합니다.
